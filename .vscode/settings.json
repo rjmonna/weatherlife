@@ -1,0 +1,64 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "C_Cpp.default.includePath": [
+      "${workspaceFolder}/src",
+      "${workspaceFolder}/include"
+    ],
+    "C_Cpp.default.defines": [
+      "_GNU_SOURCE",
+      "WEATHER_LIFE_VERSION=0.1.0"
+    ],
+    "C_Cpp.default.cStandard": "c99",
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.formatting": "Default",
+    "C_Cpp.clang_format_style": "{ BasedOnStyle: Linux, IndentWidth: 4, UseTab: Never, ColumnLimit: 100 }",
+    "[c]": {
+      "editor.formatOnSave": true,
+      "editor.defaultFormatter": "ms-vscode.cpptools",
+      "editor.wordBasedSuggestions": false,
+      "editor.rulers": [80, 100]
+    },
+    "[python]": {
+      "editor.defaultFormatter": "ms-python.python",
+      "editor.formatOnSave": true,
+      "editor.rulers": [88]
+    },
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true,
+    "python.linting.pylintArgs": ["--max-line-length=100"],
+    "files.exclude": {
+      "build": true,
+      "builddir": true,
+      "builddir-*": true,
+      "**/*.o": true,
+      "**/*.a": true,
+      "**/*.so": true,
+      "**/__pycache__": true,
+      "**/*.pyc": true
+    },
+    "search.exclude": {
+      "build": true,
+      "builddir": true,
+      ".git": true,
+      "install": true
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-vscode.cpptools",
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "eamodio.gitlens",
+      "ms-vscode.cmake-tools",
+      "mesonbuild.mesonbuild",
+      "redhat.vscode-yaml",
+      "charliermarsh.ruff",
+      "llvm-vs-code-extensions.vscode-clangd"
+    ]
+  }
+}
