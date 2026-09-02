@@ -12,7 +12,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         src/usb_windows.c
         src/usb_common.c
     )
-    set(LIBS setupapi winusb)
+    set(LIBS setupapi hid)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PLATFORM "LINUX")
     set(SOURCES

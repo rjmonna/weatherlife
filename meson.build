@@ -13,9 +13,9 @@ if host_os == 'windows'
   platform = 'windows'
   usb_dep = []
   win_deps = cc.find_library('setupapi')
-  winusb_dep = cc.find_library('winusb')
+  hid_dep = cc.find_library('hid')
   platform_files = ['src/usb_windows.c']
-  platform_libs = [win_deps, winusb_dep]
+  platform_libs = [win_deps, hid_dep]
 elif host_os == 'linux'
   platform = 'linux'
   usb_dep = dependency('libusb-1.0', required: true)
