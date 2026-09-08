@@ -117,6 +117,26 @@ weather-life/
 └── README.md                 # This file
 ```
 
+## 🔍 Passive Protocol Tracing
+
+On Windows, attach to the original application and save a local JSONL trace:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\trace_weatherlife.py --process weather --process usbwr --output .\weather-refresh-trace.jsonl
+.\.venv\Scripts\python.exe .\scripts\analyze_trace.py .\weather-refresh-trace.jsonl
+```
+
+The analyzer reports exact observed frames and labels only the known polling
+frame. It does not assign meanings to unknown bytes.
+
+To replay an archived Weather-Life response through the original parser, serve
+the backup tree locally and redirect only the legacy URL:
+
+```powershell
+python -m http.server 8765 --bind 127.0.0.1 --directory C:\Users\rmonn\OneDrive\Backup\www.weather-life.com
+.\.venv\Scripts\python.exe .\scripts\trace_weatherlife.py --process weather --process usbwr --redirect-base http://127.0.0.1:8765 --output .\weather-fake-response-trace.jsonl
+```
+
 ## 🔧 USB Protocol Details
 
 ### Command Structure
@@ -146,7 +166,42 @@ Line 1: "NYC        72 F"
 Line 2: "Cloudy   RH 65%"
 ```
 
-## 🌐 Weather Data Sources
+## 🌐 Weather Data Source
+
+The original Weather-Life service is offline. The replacement uses the free
+[Open-Meteo API](https://open-meteo.com/) for city geocoding, current weather,
+and five-day forecasts. It requires no API key.
+
+```powershell
+.\.venv\Scripts\python.exe .\python\weather_provider.py
+```
+
+The provider can also be used by the replacement application:
+
+```python
+from weather_provider import fetch_city_weather
+
+report = fetch_city_weather("Rotterdam")
+print(report.current.temperature_c)
+```
+
+The confirmed dongle polling operation and the captured display transaction
+can be exercised separately:
+
+```powershell
+.\.venv\Scripts\python.exe .\python\dongle_protocol.py --poll
+.\.venv\Scripts\python.exe .\python\dongle_protocol.py --send-observed-frame
+```
+
+The second command replays an observed frame; it does not yet encode weather
+fields.
+
+The archived service format is also supported for analysis. It is a named
+record format, not conventional comma-separated data:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'python'); from legacy_weather_csv import read_legacy_weather; d=read_legacy_weather(r'C:\Users\rmonn\OneDrive\Backup\www.weather-life.com\update\city\06344.csv'); print(d.city, d.city_code, len(d.daily))"
+```
 
 ### Recommended: Open-Meteo (FREE!)
 ```c

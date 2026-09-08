@@ -1,5 +1,5 @@
 // weather-life/src/usb_device.h
-// Cross-platform USB HID abstraction layer
+// Cross-platform Weather-Life device abstraction layer
 
 #ifndef WEATHER_LIFE_USB_DEVICE_H
 #define WEATHER_LIFE_USB_DEVICE_H
@@ -21,6 +21,9 @@
 #define CAL_USB_STATUS  0x03
 #define CMD_DEVICE_INIT 0x04
 
+// Confirmed serial settings for the connected Silicon Labs CP2102.
+#define WEATHER_SERIAL_BAUDRATE 115200
+
 // Known device IDs (will be populated from binary analysis)
 typedef struct {
     uint16_t vid;
@@ -36,6 +39,7 @@ typedef struct {
     uint16_t pid;
     char device_path[256];
     int timeout_ms;
+    bool serial_transport;
 } USBDevice;
 
 // Weather data types
@@ -66,6 +70,7 @@ USBBackend* usb_get_backend(void);
 bool usb_find_weather_device(USBDevice* device);
 bool usb_init_device(USBDevice* device);
 bool usb_send_weather_data(USBDevice* device, const WeatherData* data);
+bool usb_send_observed_display_frame(USBDevice* device);
 void usb_close(USBDevice* device);
 
 #endif  // WEATHER_LIFE_USB_DEVICE_H

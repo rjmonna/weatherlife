@@ -40,6 +40,7 @@ incdir = include_directories('src')
 # Main USB library
 usb_lib_sources = [
   'src/usb_common.c',
+  'src/weather_response.c',
 ] + platform_files
 
 usb_lib = static_library(
@@ -61,7 +62,7 @@ weather_discover = executable(
 )
 
 # Installation
-install_headers('src/usb_device.h', subdir: 'weather-life')
+install_headers('src/usb_device.h', 'src/weather_response.h', subdir: 'weather-life')
 
 # Tests (if any)
 subdir('tests', if_found: [] )

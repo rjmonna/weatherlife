@@ -1,14 +1,14 @@
 # Reverse Engineering Report: Weather-Life Dongle
 
 **Date**: 2026-08-12  
-**Status**: Phase 2 Complete - Protocol Mapped  
+**Status**: Partial - Live Serial Traffic Captured
 **Tools Used**: Ghidra, Binary Analysis, Python String Extraction
 
 ## Executive Summary
 
 Weather-Life is a Windows-only USB LCD weather display application (defunct since weather-life.com shutdown ~2024). Through systematic reverse engineering of the application binaries and website backup, we have mapped the complete USB protocol and identified the hardware interface.
 
-**Key Finding**: The device uses **Silicon Labs CP2102** (standard USB-to-Serial chip), communicating via custom binary commands over USB HID.
+**Key Finding**: The connected device is a **Silicon Labs CP2102 USB-to-UART bridge** on `COM4`. The original application's live serial traffic has now been captured. The binary HID imports remain evidence of possible supported code paths, not proof of this device's transport.
 
 ## Binary Analysis Results
 
@@ -75,8 +75,8 @@ usbwr.exe: Silicon Labs (0x10c4) x40+, Microchip (0x424) x8
 - **Part**: CP2102 USB-to-Serial Bridge
 - **VID**: 0x10c4
 - **PID**: 0xea60 (or 0xea61 for variant)
-- **Interface**: USB HID (via SetupDi device enumeration)
-- **Endpoints**: Standard bulk in (0x81) / bulk out (0x01)
+- **Interface**: Windows serial port `COM4` at `115200 8N1`
+- **USB endpoints and report format**: Not established
 
 **Alternative Devices** (fallback support):
 - Microchip Technology USB Bridges (0x0424:0x274a)
@@ -91,6 +91,49 @@ usbwr.exe: Silicon Labs (0x10c4) x40+, Microchip (0x424) x8
 - **Update Rate**: Hourly or on-demand (inferred)
 
 ## USB Communication Protocol
+
+### Live Serial Trace (2026-09-08)
+
+The original `usbwr.exe` process was traced while the device was connected. The trace observed:
+
+- 93 writes of the exact 9-byte frame `00 55 53 42 43 00 10 01 00`
+- 1 write of the exact 9-byte frame `00 55 53 42 43 00 10 02 00`
+- 1 write of the exact 17-byte frame `00 10 14 10 10 10 10 10 10 14 10 10 10 10 16 15 1f`
+- 2 reads of the same 131-byte block beginning with ASCII `device=ON\r\nDST=OFF`
+
+The 9-byte frames share the observed prefix `00 55 53 42 43 00 10` and differ at byte 7 (`01` or `02`). Their meanings are not assigned here. The 17-byte frame is adjacent to the `... 00 10 02 00` write in the trace, but its meaning is also unassigned. No weather values, registration payload, checksum rule, or acknowledgment has been proven.
+
+A stack-enabled capture resolved the repeated `... 01 00` frame to the native
+`usbwr.exe!CAL_USB_READ` call path. This assigns the frame to the read/polling
+operation, but does not decode the `USBC` wrapper or its response semantics.
+The 17-byte frame is now resolved to the native `usbwr.exe!CAL_USB_WRITE` call
+path, with the traced caller at `usbwr.exe+0x404eef`. This confirms the command
+path, not the field encoding.
+
+Replaying the confirmed read frame through `python/dongle_protocol.py` returned
+diagnostic text containing `DEBUG | ??:??:?? 5 [PowerFSM] State: ON`. Replaying
+the observed 17-byte frame produced no immediate response. These are device
+behavior observations, not proof that the frame updates weather content.
+
+### Refresh Capture (2026-09-08)
+
+During a user-triggered refresh, `weather.exe` opened:
+
+```text
+http://www.weather-life.com/update/city/06344.csv
+```
+
+At the same time, `usbwr.exe` produced two occurrences of the 17-byte frame above. The capture also contained the normal repeated 9-byte polling frame. This establishes the old server endpoint and the temporal association between a refresh attempt and the 17-byte device write, but it does not prove that the server returned weather data or that the device displayed it. The server is now unavailable, so the replacement uses Open-Meteo; do not reintroduce this endpoint into new code.
+
+A controlled replay was attempted by redirecting the legacy URL to a local HTTP
+server serving the archived `06344.csv` fixture. The local server received no
+request during the user-triggered event, so the resulting frame
+`00 10 14 10 10 10 10 10 10 14 10 10 10 10 14 13 1d` cannot be attributed to
+the fake response. The replay infrastructure remains available, but a future
+capture must verify an actual redirected request before using frame differences
+as weather-field evidence.
+
+The following packet layouts remain historical hypotheses and must not be treated as the live wire format until more traces correlate bytes with a known UI action.
 
 ### Command Structure
 
@@ -203,6 +246,35 @@ Line 2 (16 chars): Weather + Humidity
 
 ## Weather Data Integration
 
+### Archived Legacy Response Schema
+
+The local backup contains the exact fixture requested by the original app for
+the observed Rotterdam code:
+
+```text
+update/city/06344.csv
+```
+
+It is a named-record text format rather than comma-separated columns. The
+header identifies `CITY_AND_WMO` as `Netherlands;Rotterdam;06344`, followed by
+current fields such as `TEMP`, `PRE`, `WS`, `HUM`, and `DEWP`. Forecast records
+are grouped under `DAY1` through `DAY6` and include `TEMPH`, `TEMPL`, icon,
+wind, humidity, precipitation, sunrise, sunset, and UV fields. The parser in
+`python/legacy_weather_csv.py` preserves these expressions without assigning
+new units or meanings.
+
+The native parser in `src/weather_response.c` maps the verified current numeric
+records into `WeatherData`: `TEMP` to Celsius, `HUM` to percent, `WS` from
+km/h to m/s, and `PRE` to hPa. It deliberately leaves `WEA` and forecast icon
+codes unmapped because their radio/display encoding has not been correlated.
+
+The archived compressed `weather.txt` and `usbwr.txt` files begin with zlib
+data and decompress to PE executables. Their embedded PDB strings identify
+historical helper builds as `usbwr-(ask-5day-6day)-release1.2` and
+`usbwr-fsk-ask-cur-zone-release1.2`. This confirms separate FSK/ASK product
+families and 5/6-day variants, but does not by itself expose the radio-field
+packing.
+
 ### Original API (weather-life.com - DEFUNCT)
 
 From website backup analysis:
@@ -297,14 +369,14 @@ UsbWeatherStation = "C:\Program Files (x86)\Weather\usbwr.exe"
 ## Implementation Roadmap
 
 ### Phase 3: Core Implementation
-- [ ] Compile Windows USB layer
+- [x] Compile Windows USB layer
 - [ ] Compile Linux USB layer
 - [ ] Compile macOS USB layer
 - [ ] Test device discovery on each platform
-- [ ] Verify USB communication
+- [ ] Verify USB communication using confirmed device frames
 
 ### Phase 4: Feature Integration
-- [ ] Weather API integration (Open-Meteo)
+- [x] Weather API integration (Open-Meteo)
 - [ ] Display formatting
 - [ ] Location configuration
 - [ ] Systemd/LaunchAgent integration
@@ -342,14 +414,14 @@ UsbWeatherStation = "C:\Program Files (x86)\Weather\usbwr.exe"
 
 ## Next Steps
 
-1. **Verify Device**: Plug in actual weather dongle and run Python discovery
-2. **Validate Protocol**: Capture USB traffic with device
-3. **Implement Core**: Build and test C USB layer
-4. **Integrate API**: Connect weather data source
-5. **Cross-Platform Test**: Verify on Windows, Linux, macOS
+1. **Correlate Frames**: Capture one successful display update with known weather values
+2. **Decode Fields**: Determine the 17-byte frame's field boundaries and checksum, if any
+3. **Implement Transport**: Add a CP210x serial backend without treating HID as the primary path
+4. **Connect Display**: Convert an Open-Meteo report only after the frame format is confirmed
+5. **Cross-Platform Test**: Verify discovery and display updates on Windows, Linux, and macOS
 
 ---
 
-**Reverse Engineering Confidence Level**: 85%  
-**Protocol Confidence**: 70% (commands identified, data format partially inferred)  
-**Implementation Status**: Ready to begin Phase 3
+**Reverse Engineering Confidence Level**: 75%
+**Protocol Confidence**: 45% (read and write call paths resolved; display payload semantics unconfirmed)
+**Implementation Status**: Confirmed CP2102 serial polling is implemented in `src/`; weather-field encoding remains unconfirmed and is explicitly refused by the serial path

@@ -40,7 +40,64 @@ typedef struct {
     HANDLE device_file;
     PHIDP_PREPARSED_DATA preparsed_data;
     HIDP_CAPS caps;
+    bool serial_transport;
 } DeviceContext;
+
+static bool open_serial_windows(const char* port_name, USBDevice* device)
+{
+    HANDLE file;
+    DCB state;
+    COMMTIMEOUTS timeouts;
+    DeviceContext* context;
+
+    file = CreateFileA(port_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                       OPEN_EXISTING, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    memset(&state, 0, sizeof(state));
+    state.DCBlength = sizeof(state);
+    if (!GetCommState(file, &state)) {
+        CloseHandle(file);
+        return false;
+    }
+    state.BaudRate = WEATHER_SERIAL_BAUDRATE;
+    state.ByteSize = 8;
+    state.Parity = NOPARITY;
+    state.StopBits = ONESTOPBIT;
+    state.fDtrControl = DTR_CONTROL_DISABLE;
+    state.fRtsControl = RTS_CONTROL_DISABLE;
+    if (!SetCommState(file, &state)) {
+        CloseHandle(file);
+        return false;
+    }
+
+    memset(&timeouts, 0, sizeof(timeouts));
+    timeouts.ReadIntervalTimeout = 50;
+    timeouts.ReadTotalTimeoutConstant = 500;
+    timeouts.ReadTotalTimeoutMultiplier = 10;
+    timeouts.WriteTotalTimeoutConstant = 500;
+    timeouts.WriteTotalTimeoutMultiplier = 10;
+    if (!SetCommTimeouts(file, &timeouts)) {
+        CloseHandle(file);
+        return false;
+    }
+
+    context = (DeviceContext*)calloc(1, sizeof(*context));
+    if (!context) {
+        CloseHandle(file);
+        return false;
+    }
+    context->device_file = file;
+    context->serial_transport = true;
+    device->handle = context;
+    device->vid = 0x10c4;
+    device->pid = 0xea60;
+    strncpy_s(device->device_path, sizeof(device->device_path),
+              port_name, _TRUNCATE);
+    device->timeout_ms = 5000;
+    device->serial_transport = true;
+    return true;
+}
 
 static bool is_known_device(const HIDD_ATTRIBUTES* attributes)
 {
@@ -68,8 +125,11 @@ static bool open_device_windows(const char* device_path, USBDevice* device)
     HDEVINFO device_info;
     SP_DEVICE_INTERFACE_DATA interface_data;
 
-    (void)device_path;
     if (!device) return false;
+    if (device_path && (_stricmp(device_path, "10c4:ea60") == 0 ||
+                        _stricmp(device_path, "10c4:ea61") == 0)) {
+        if (open_serial_windows("\\\\.\\COM4", device)) return true;
+    }
     HidD_GetHidGuid(&hid_guid);
     device_info = SetupDiGetClassDevsA(&hid_guid, NULL, NULL,
                                        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
@@ -125,12 +185,14 @@ static bool open_device_windows(const char* device_path, USBDevice* device)
         context->device_file = file;
         context->preparsed_data = preparsed_data;
         context->caps = caps;
+        context->serial_transport = false;
         device->handle = context;
         device->vid = attributes.VendorID;
         device->pid = attributes.ProductID;
         strncpy_s(device->device_path, sizeof(device->device_path),
                   detail->DevicePath, _TRUNCATE);
         device->timeout_ms = 5000;
+        device->serial_transport = false;
         free(detail);
         SetupDiDestroyDeviceInfoList(device_info);
         return true;
@@ -163,6 +225,13 @@ static bool read_data_windows(USBDevice* device, uint8_t* buffer, int buffer_siz
     if (!device || !device->handle || !buffer || !bytes_read || buffer_size < 0) return false;
 
     context = (DeviceContext*)device->handle;
+    if (context->serial_transport) {
+        DWORD received = 0;
+        if (!ReadFile(context->device_file, buffer, (DWORD)buffer_size,
+                      &received, NULL)) return false;
+        *bytes_read = (int)received;
+        return true;
+    }
     report_size = context->caps.FeatureReportByteLength;
     if (report_size <= 1 || buffer_size < (int)(report_size - 1)) return false;
     report = (BYTE*)calloc(report_size, sizeof(BYTE));
@@ -187,6 +256,11 @@ static bool write_data_windows(USBDevice* device, const uint8_t* buffer, int buf
     if (!device || !device->handle || !buffer || buffer_size < 0) return false;
 
     context = (DeviceContext*)device->handle;
+    if (context->serial_transport) {
+        DWORD written = 0;
+        return WriteFile(context->device_file, buffer, (DWORD)buffer_size,
+                         &written, NULL) && written == (DWORD)buffer_size;
+    }
     report_size = context->caps.FeatureReportByteLength;
     if (report_size <= 1 || buffer_size > (int)(report_size - 1)) return false;
     report = (BYTE*)calloc(report_size, sizeof(BYTE));
@@ -200,7 +274,17 @@ static bool write_data_windows(USBDevice* device, const uint8_t* buffer, int buf
 // Send USB command
 static bool send_command_windows(USBDevice* device, uint8_t cmd, const uint8_t* data, int data_len)
 {
+    static const uint8_t read_frame[] = {
+        0x00, 0x55, 0x53, 0x42, 0x43, 0x00, 0x10, 0x01, 0x00
+    };
+    DeviceContext* context;
+
     if (!device) return false;
+    context = (DeviceContext*)device->handle;
+    if (context && context->serial_transport) {
+        if (cmd != CAL_USB_READ || data_len != 0) return false;
+        return write_data_windows(device, read_frame, sizeof(read_frame));
+    }
     
     // Create command packet: [command_id][length][data...]
     uint8_t* packet = (uint8_t*)malloc(1 + 1 + data_len);
@@ -227,8 +311,10 @@ static bool get_status_windows(USBDevice* device, uint8_t* status)
     uint8_t buffer[64];
     int bytes_read = 0;
     
-    // Send status query command
-    if (!send_command_windows(device, CAL_USB_STATUS, NULL, 0)) {
+    // Serial devices expose status through the confirmed read/poll frame.
+    if (!send_command_windows(device,
+                              device->serial_transport ? CAL_USB_READ : CAL_USB_STATUS,
+                              NULL, 0)) {
         return false;
     }
     
@@ -238,7 +324,20 @@ static bool get_status_windows(USBDevice* device, uint8_t* status)
     }
     
     if (bytes_read > 0) {
-        *status = buffer[0];
+        if (device->serial_transport) {
+            const char state_marker[] = "State: ON";
+            size_t marker_length = sizeof(state_marker) - 1;
+            bool found = false;
+            for (int offset = 0; offset + (int)marker_length <= bytes_read; offset++) {
+                if (memcmp(buffer + offset, state_marker, marker_length) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+            *status = found ? 1 : 0;
+        } else {
+            *status = buffer[0];
+        }
         return true;
     }
     

@@ -3,3 +3,7 @@
 *.pyc
 
 build/
+.cmake-validation/
+
+weather-refresh-trace.jsonl
+weather-*-trace.jsonl

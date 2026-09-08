@@ -9,6 +9,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(PLATFORM "WINDOWS")
     set(SOURCES 
         src/usb_device.h
+        src/weather_response.h
+        src/weather_response.c
         src/usb_windows.c
         src/usb_common.c
     )

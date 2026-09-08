@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
 // Get appropriate backend based on platform
 USBBackend* usb_get_backend(void)
 {
@@ -73,7 +77,28 @@ bool usb_init_device(USBDevice* device)
     
     printf("Initializing device at %s\n", device->device_path);
     
-    // Send initialization command
+    if (device->serial_transport) {
+        uint8_t buffer[256];
+        int bytes_read = 0;
+
+        if (!backend->send_command(device, CAL_USB_READ, NULL, 0)) {
+            fprintf(stderr, "Failed to send serial read frame\n");
+            return false;
+        }
+        #ifdef _WIN32
+            Sleep(100);
+        #else
+            usleep(100000);
+        #endif
+        if (!backend->read_data(device, buffer, sizeof(buffer), &bytes_read)) {
+            fprintf(stderr, "Failed to read serial diagnostic response\n");
+            return false;
+        }
+        printf("Serial diagnostic response: %.*s\n", bytes_read, buffer);
+        return bytes_read > 0;
+    }
+
+    // Send initialization command for legacy HID devices.
     if (!backend->send_command(device, CMD_DEVICE_INIT, NULL, 0)) {
         fprintf(stderr, "Failed to send init command\n");
         return false;
@@ -101,6 +126,11 @@ bool usb_init_device(USBDevice* device)
 bool usb_send_weather_data(USBDevice* device, const WeatherData* data)
 {
     if (!device || !device->handle || !data) return false;
+
+    if (device->serial_transport) {
+        fprintf(stderr, "Weather-field encoding is not confirmed for the serial device\n");
+        return false;
+    }
     
     USBBackend* backend = usb_get_backend();
     if (!backend) return false;
@@ -129,6 +159,20 @@ bool usb_send_weather_data(USBDevice* device, const WeatherData* data)
     
     // Send to device
     return backend->send_command(device, CAL_USB_WRITE, packet, packet_len);
+}
+
+bool usb_send_observed_display_frame(USBDevice* device)
+{
+    static const uint8_t observed_frame[] = {
+        0x00, 0x10, 0x14, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+        0x14, 0x10, 0x10, 0x10, 0x10, 0x14, 0x13, 0x1d
+    };
+    USBBackend* backend;
+
+    if (!device || !device->handle || !device->serial_transport) return false;
+    backend = usb_get_backend();
+    if (!backend || !backend->write_data) return false;
+    return backend->write_data(device, observed_frame, sizeof(observed_frame));
 }
 
 // Close device connection

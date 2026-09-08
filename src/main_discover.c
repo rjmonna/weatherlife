@@ -16,6 +16,9 @@
 
 int main(int argc, char* argv[])
 {
+    bool replay_observed_frame = argc > 1 &&
+                                 strcmp(argv[1], "--replay-observed-frame") == 0;
+
     printf("="
 );
     printf("Weather-Life USB Device Discoverer\n");
@@ -93,6 +96,17 @@ int main(int argc, char* argv[])
     if (!usb_init_device(&device)) {
         fprintf(stderr, "[!] Warning: Device initialization may have failed\n");
         fprintf(stderr, "    But device is still open - trying to continue\n");
+    }
+
+    if (replay_observed_frame) {
+        if (usb_send_observed_display_frame(&device)) {
+            printf("[+] Replayed the observed 17-byte display frame\n");
+        } else {
+            printf("[-] Could not replay the observed display frame\n");
+        }
+        usb_close(&device);
+        backend->free_device_list(devices);
+        return 0;
     }
     
     // Test sending command

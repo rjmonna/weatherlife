@@ -99,7 +99,7 @@ class WeatherDeviceDiscovery:
             try:
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
                     for i in range(winreg.QueryInfoKey(key)[0]):
-                        subkey_name = winreg.EnumKeyEx(key, i)
+                        subkey_name = winreg.EnumKey(key, i)
                         if 'VID' in subkey_name:
                             print(f"    Device: {subkey_name}")
                             self.found_devices.append({
