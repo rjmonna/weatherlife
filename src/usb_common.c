@@ -2,9 +2,11 @@
 // Platform-agnostic USB operations
 
 #include "usb_device.h"
+#include "weather_frame.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -77,27 +79,6 @@ bool usb_init_device(USBDevice* device)
     
     printf("Initializing device at %s\n", device->device_path);
     
-    if (device->serial_transport) {
-        uint8_t buffer[256];
-        int bytes_read = 0;
-
-        if (!backend->send_command(device, CAL_USB_READ, NULL, 0)) {
-            fprintf(stderr, "Failed to send serial read frame\n");
-            return false;
-        }
-        #ifdef _WIN32
-            Sleep(100);
-        #else
-            usleep(100000);
-        #endif
-        if (!backend->read_data(device, buffer, sizeof(buffer), &bytes_read)) {
-            fprintf(stderr, "Failed to read serial diagnostic response\n");
-            return false;
-        }
-        printf("Serial diagnostic response: %.*s\n", bytes_read, buffer);
-        return bytes_read > 0;
-    }
-
     // Send initialization command for legacy HID devices.
     if (!backend->send_command(device, CMD_DEVICE_INIT, NULL, 0)) {
         fprintf(stderr, "Failed to send init command\n");
@@ -125,54 +106,46 @@ bool usb_init_device(USBDevice* device)
 // Send weather data to display
 bool usb_send_weather_data(USBDevice* device, const WeatherData* data)
 {
+    USBBackend* backend;
+    WeatherFrameInput input;
+    uint8_t frame[WEATHER_FRAME_SIZE];
+    time_t now;
+    struct tm current_time;
+
     if (!device || !device->handle || !data) return false;
 
-    if (device->serial_transport) {
-        fprintf(stderr, "Weather-field encoding is not confirmed for the serial device\n");
-        return false;
-    }
-    
-    USBBackend* backend = usb_get_backend();
-    if (!backend) return false;
-    
-    // Format weather data for LCD display
-    // Format: [temp_byte][humidity_byte][condition_byte][wind_speed_word][wind_dir_word]
-    uint8_t packet[16];
-    int packet_len = 0;
-    
-    // Temperature (0-100, mapping to display range)
-    packet[packet_len++] = (uint8_t)(data->temperature + 50);  // Offset for negatives
-    
-    // Humidity percentage
-    packet[packet_len++] = (uint8_t)data->humidity;
-    
-    // Weather condition code
-    packet[packet_len++] = data->weather_code;
-    
-    // Wind speed (as 16-bit value)
-    *(uint16_t*)(packet + packet_len) = (uint16_t)(data->wind_speed * 10);  // Scale to int
-    packet_len += 2;
-    
-    // Wind direction (0-359)
-    *(uint16_t*)(packet + packet_len) = data->wind_direction;
-    packet_len += 2;
-    
-    // Send to device
-    return backend->send_command(device, CAL_USB_WRITE, packet, packet_len);
-}
-
-bool usb_send_observed_display_frame(USBDevice* device)
-{
-    static const uint8_t observed_frame[] = {
-        0x00, 0x10, 0x14, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
-        0x14, 0x10, 0x10, 0x10, 0x10, 0x14, 0x13, 0x1d
-    };
-    USBBackend* backend;
-
-    if (!device || !device->handle || !device->serial_transport) return false;
     backend = usb_get_backend();
     if (!backend || !backend->write_data) return false;
-    return backend->write_data(device, observed_frame, sizeof(observed_frame));
+
+    memset(&input, 0, sizeof(input));
+    now = time(NULL);
+#ifdef _WIN32
+    if (localtime_s(&current_time, &now) != 0) return false;
+#else
+    if (!localtime_r(&now, &current_time)) return false;
+#endif
+    input.time.month = current_time.tm_mon + 1;
+    input.time.day = current_time.tm_mday;
+    input.time.hour = current_time.tm_hour;
+    input.time.minute = current_time.tm_min;
+    input.current_temperature_c = data->temperature;
+    input.pressure_hpa = data->pressure > 0 ? (uint16_t)data->pressure : 0;
+    input.wind_speed = data->wind_speed < 0 ? 0 : (uint16_t)data->wind_speed;
+    input.humidity_percent = data->humidity < 0 ? 0 : (uint16_t)data->humidity;
+
+    if (!weather_frame_build(&input, frame)) return false;
+
+    // This writes the experimental 16-byte segment directly. Rainfall is not
+    // included until its native bit width and offset are proven.
+    return backend->write_data(device, frame, WEATHER_FRAME_SIZE);
+}
+
+bool usb_replay_captured_registration_frame(USBDevice* device)
+{
+    (void)device;
+    fprintf(stderr,
+            "Registration refused: onlywell.dll framing is confirmed, but replaying the device response path remains intentionally disabled until the full HID response contract is proven\n");
+    return false;
 }
 
 // Close device connection

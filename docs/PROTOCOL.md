@@ -1,419 +1,99 @@
-# USB Protocol Specification: Weather-Life Dongle
+# USB Protocol Notes: Weather-Life Dongle
 
-**Version**: 1.0  
-**Device**: Silicon Labs CP2102 USB-to-Serial Bridge  
-**Status**: Reverse Engineered  
-**Confidence**: 70% (based on binary analysis)
+**Device**: Tenx composite HID (`0x1130:0x0202`)  
+**Status**: Partially reverse engineered  
+**Confidence**: Discovery, registration framing, and end-to-end archived
+weather replay are confirmed; individual weather field semantics remain
+unconfirmed.
 
 ## Overview
 
-The Weather-Life dongle communicates via USB using a custom binary protocol layered over HID. Commands are sent to display weather information on an LCD.
+The original application communicates with a Tenx composite HID device. The
+transport and registration handshake are known. The weather serializer is a
+separate native bit-packing path and must not be confused with the captured
+registration frames.
 
 ## Physical Layer
 
 ### USB Interface
-- **Device Class**: USB-to-Serial (CDC)
-- **Vendor ID**: 0x10c4 (Silicon Labs)
-- **Product ID**: 0xea60 (CP2102)
-- **Speed**: Full-speed USB (12 Mbps)
-- **Endpoints**:
-  - Bulk IN: 0x81 (64 bytes)
-  - Bulk OUT: 0x01 (64 bytes)
-  - Optional Control: 0x00
+- **Device Class**: HID composite device
+- **Vendor ID**: 0x1130 (Tenx)
+- **Product ID**: 0x0202
+- **HID Usage Page**: 1
+- **Required Usages**: 0 and 3
+- **Observed I/O**: HID feature reports through `HidD_GetFeature` and
+   `HidD_SetFeature`
+- **Endpoint layout**: Not treated as a protocol contract; the Windows HID
+   API abstracts the underlying reports.
 
 ### Physical Connector
 - **Type**: USB-A (standard)
 - **Power**: Drawn from USB host (5V, limited current)
+## Confirmed control traffic
 
-## Data Link Layer
+The passive traces contain these facts only:
 
-### Packet Format
+- `00 55 53 42 43 00 10 01 00` is a repeated 9-byte control report on the
+   `CAL_USB_READ` path.
+- A related `... 02 00` report is observed, but its meaning is unassigned.
+- The repeated 17-byte report is the `usbwr.dll` registration handshake, not
+   weather data. Its nibble packing and CRC-8 are documented in
+   `docs/REVERSE_ENGINEERING.md` and implemented offline in
+   `python/dongle_protocol.py`.
+- The HID transport adds a report byte before a 16-byte serializer segment,
+   producing a 17-byte data report. A second serializer segment is 8 bytes,
+   but no standalone 16-byte or 8-byte weather report has yet been captured.
 
-All packets follow this format:
+## Device-button registration capture
 
-```
-┌──────────────┬──────────────┬─────────────────────┐
-│   Command    │    Length    │       Payload       │
-│   (1 byte)   │   (1 byte)   │   (0-62 bytes)      │
-└──────────────┴──────────────┴─────────────────────┘
-```
+The passive capture `traces/device-registration-trace.jsonl` recorded the original
+application's Device action for about 17 minutes. Analyze it with:
 
-#### Command Byte (Offset 0)
-| Value | Name | Direction | Purpose |
-|-------|------|-----------|---------|
-| 0x01 | CAL_USB_READ | Host→Device | Read data from device |
-| 0x02 | CAL_USB_WRITE | Host→Device | Send data to device |
-| 0x03 | CAL_USB_STATUS | Host→Device | Query device status |
-| 0x04 | DeviceIni | Host→Device | Initialize device |
-| 0x00 | ACK | Device→Host | Positive acknowledgment |
-| 0xFF | NAK | Device→Host | Negative acknowledgment |
-
-#### Length Byte (Offset 1)
-- **Range**: 0-62 bytes (USB packet size - 2 bytes header)
-- **Meaning**: Number of payload bytes following
-- **Note**: If 0, no payload expected
-
-#### Payload (Offset 2 to N)
-- **Max Size**: 62 bytes
-- **Content**: Command-specific data
-- **Padding**: Unused bytes may be 0x00
-
-### Response Format
-
-```
-┌──────────────┬──────────────┬─────────────────────┐
-│    Status    │    Length    │       Data          │
-│   (1 byte)   │   (1 byte)   │   (0-62 bytes)      │
-└──────────────┴──────────────┴─────────────────────┘
+```powershell
+.\.venv\Scripts\python.exe .\scripts\analyze_trace.py .\traces\device-registration-trace.jsonl
 ```
 
-#### Status Byte (Offset 0)
-| Value | Meaning |
-|-------|---------|
-| 0x00 | Success |
-| 0x01 | Command not recognized |
-| 0x02 | Invalid parameters |
-| 0x03 | Device not initialized |
-| 0x04 | Hardware error |
-| 0x05 | USB communication error |
-| 0xFF | Generic error |
+It contains 19 `CAL_USB_WRITE` calls and 19 successful 17-byte HID writes. The
+same registration payload was retransmitted 18 times. The device was polled
+6,624 times with the repeated 9-byte read command, but every
+`HidD_GetFeature-return` was the unchanged all-`0x10` report. No registration
+echo was observed, so the missing “Device registration end” indicates a
+registration timeout/retry condition, not success.
 
-## Application Layer
+Because this trace attached to already-running processes, it does not contain
+the earlier `usbdeviceread` entry or `GetProcAddress` export-resolution events.
 
-### Command Definitions
+## Weather serializer evidence
 
-#### 1. CAL_USB_WRITE - Send Data to Device
+Static analysis located a native serializer in `usbwr.exe`:
 
-**Direction**: Host → Device  
-**Command Byte**: 0x02
+- It parses named records from the legacy weather file.
+- It uses an MSB-first, variable-width bit packer.
+- The archived record widths include `TEMP<9>`, `BTEMP<9>`, `WEA<6>`,
+   `PRE<11>`, `TREND<2>`, `WS<6>`, `BFT<6>`, `WW<4>`, `HUM`, and daily
+   fields such as `TEMPH<9>` and `TEMPL<9>`.
+- The `UPD` record is directly proven: month/day/hour/minute are packed as
+   4/5/5/6 bits, totaling 20 bits.
+- An archived `update/city/06344.csv` served locally through the original
+   request path was accepted by `weather.exe`; the DeskWeather window displayed
+   data after the refresh. This proves the parser-to-serializer-to-device path,
+   but does not identify individual weather-field offsets.
+- Field order, absolute offsets, response semantics, condition-code values,
+   display formatting, and device acknowledgments remain unconfirmed.
 
-**Request Format:**
-```
-0x02 <length> <weather_data>
-```
+Do not use a byte-oriented command-plus-length payload as an implementation
+contract. The original weather path is a bit-packed
+serializer and must first be captured at the `CAL_USB_WRITE` call boundary.
 
-**Payload Structure** (for weather display):
-```
-Offset  Size  Field           Type      Description
-------  ----  -----           ----      -----------
-0       1     Temp_Raw        uint8_t   Temperature (offset 50 for negatives)
-1       1     Humidity        uint8_t   Relative humidity 0-100
-2       1     Weather_Code    uint8_t   Weather condition code
-3       2     Wind_Speed      uint16_t  Wind speed in m/s × 10 (little-endian)
-5       2     Wind_Direction  uint16_t  Direction 0-359° (little-endian)
-7       1     Pressure        uint8_t   Atmospheric pressure (offset 900 hPa)
-```
+## Evidence standard
 
-**Example** (Sunny, 22°C, 65% RH, 10 m/s wind from W):
-```
-Hex: 02 08 52 41 01 64 00 B4 00
-     ││││││││││││││││││││││││││││
-     │││  Temperature: 0x52 (82 decimal, 82-50=32°F or ~22°C)
-     ││   Humidity: 0x41 (65%)
-     │    Weather: 0x01 (Sunny)
-     │    Wind Speed: 0x0064 (100 × 0.1 = 10 m/s)
-     │    Wind Dir: 0x00B4 (180° = South... hmm, example says W)
-```
+Treat a field mapping as confirmed only when a controlled fixture changes one
+legacy record at a time and the corresponding serializer bits change at the
+expected location. Keep raw traces and the fixture used for each comparison.
+The native client therefore refuses to send the old guessed byte-oriented
+weather packet. Keep replay and differential tracing passive until field
+offsets are mapped.
 
-**Response**:
-```
-0x00 0x00  (Success with no additional data)
-or
-0x03 0x00  (Device not initialized)
-```
-
-#### 2. CAL_USB_READ - Read Data from Device
-
-**Direction**: Host → Device  
-**Command Byte**: 0x01
-
-**Request Format:**
-```
-0x01 0x00  (No payload)
-```
-
-**Response Format:**
-```
-0x00 <length> <device_data>
-```
-
-**Response Payload** (device sensor data):
-```
-Offset  Size  Field           Description
-------  ----  -----           -----------
-0       1     Device_Status   Device state (0=OK, non-zero=error)
-1       1     Signal_Strength Signal quality or battery level
-2       4     Reserved        (for future use)
-```
-
-#### 3. CAL_USB_STATUS - Query Device Status
-
-**Direction**: Host → Device  
-**Command Byte**: 0x03
-
-**Request Format:**
-```
-0x03 0x00  (No payload)
-```
-
-**Response Format:**
-```
-0x00 0x01 <status_byte>
-
-Status Byte Bits:
-Bit 7-6:  Unused
-Bit 5:    Display Ready
-Bit 4:    USB Connected
-Bit 3:    Data Valid
-Bit 2:    Error Flag
-Bit 1:    Reserved
-Bit 0:    Device Ready
-```
-
-**Examples**:
-```
-0x00 0x01 0x3F  (All systems OK: device ready, connected, display ready, data valid)
-0x00 0x01 0x01  (Minimal: just device ready)
-0x00 0x01 0x04  (Error condition detected)
-```
-
-#### 4. DeviceIni - Initialize Device
-
-**Direction**: Host → Device  
-**Command Byte**: 0x04
-
-**Request Format:**
-```
-0x04 0x00  (No payload)
-```
-
-**Response Format:**
-```
-0x00 0x00  (Success)
-or
-0x04 0x00  (Hardware error)
-```
-
-**Purpose**:
-- Initialize internal state
-- Clear display
-- Reset any error flags
-- Prepare for weather data
-
-**Timing**:
-- Should be called on application startup
-- May be called periodically as watchdog
-- Typical response time: 100-500 ms
-
-## Communication Timing
-
-### Initialization Sequence
-```
-1. Host sends: 0x04 0x00 (DeviceIni)
-2. Device responds: 0x00 0x00 (after 100-500 ms)
-3. Host can now send weather data
-```
-
-### Update Cycle (Typical)
-```
-Every hour (or on-demand):
-1. Fetch weather from API
-2. Parse temperature, humidity, wind, condition
-3. Format as CAL_USB_WRITE payload
-4. Send: 0x02 <len> <weather_data>
-5. Device responds: 0x00 0x00
-6. Continue for 1 hour or until next weather fetch
-```
-
-### Error Recovery
-```
-If no response after 5 seconds:
-1. Retry command (up to 3 times)
-2. If still fails, call DeviceIni
-3. If still fails, report device error
-4. Notify user to check USB connection
-```
-
-## Weather Condition Codes
-
-```
-Code  Condition           Display
-----  ---------           -------
-0x00  Clear/Sunny         ☀
-0x01  Partly Cloudy       ⛅
-0x02  Cloudy              ☁
-0x03  Overcast            ⛁
-0x04  Light Rain          🌦
-0x05  Rain                🌧
-0x06  Heavy Rain          ⛈
-0x07  Thunderstorm        ⚡
-0x08  Sleet               ❄
-0x09  Snow                ⛄
-0x0A  Light Snow          ⛄
-0x0B  Fog                 🌫
-0x0C  Mist                🌫
-0x0D  Wind                💨
-0x0E  Hail                ❆
-0x0F  Reserved for future use
-```
-
-## Display Formatting (16x2 LCD)
-
-### Line 1 (16 characters): Location + Temperature
-```
-Format: "LOCATION    TEMP"
-Example: "New York    72°F"
-         "        or" 
-         "London   18°C"
-
-Parsing Logic:
-- Bytes 0-10: Location name (left-aligned, space-padded)
-- Bytes 11-15: Temperature (right-aligned, with ° symbol)
-```
-
-### Line 2 (16 characters): Condition + Humidity + Wind
-```
-Format: "CONDITION    RH%"  (typical)
-Example: "Cloudy      65%"
-         "Sunny Wind12W"
-
-Parsing Logic:
-- Bytes 0-6:  Weather condition name (left-aligned)
-- Bytes 7-10: Optional wind speed/direction
-- Bytes 11-15: Humidity percentage (right-aligned)
-```
-
-## Performance Requirements
-
-### Minimum Response Times
-- **Status Query**: < 100 ms
-- **Write Command**: < 500 ms
-- **Read Command**: < 200 ms
-- **Initialization**: < 1 second
-
-### Typical Timing
-- Power-up to ready: 1-2 seconds
-- Weather update: 2-5 seconds
-- Display refresh: Immediate (LCD latency ~50-100 ms)
-
-## Error Handling
-
-### Common Errors
-
-```
-Condition                   Response        Action
----------                   --------        ------
-Device not plugged in       No response     Retry with backoff
-USB driver missing          No response     Notify user to install driver
-Device firmware corrupt     0xFF response   Factory reset required
-USB cable disconnected      0x05 error      Notify device disconnected
-Display failure             0x04 error      Device HW fault
-Invalid command ID          0x01 error      Check command byte
-Payload too large           0x02 error      Truncate to 62 bytes
-Device not initialized      0x03 error      Send DeviceIni first
-```
-
-### Retry Strategy
-```
-1. Send command
-2. Wait 500 ms for response
-3. If no response and retries < 3:
-   - Wait 200 ms
-   - Retry command
-4. If retries exhausted:
-   - Send DeviceIni
-   - Wait 1 second
-   - Retry original command once more
-5. If still fails:
-   - Report device error
-   - Notify user of USB issue
-```
-
-## Integration with Temperature Units
-
-### Display Configuration
-The device appears to handle both Fahrenheit and Celsius based on locale.
-
-**Temperature Encoding** (in payload):
-```
-Raw Value = Actual Temperature + 50
-
-Examples:
-- 72°F → 0x52 (82 decimal)
-- 0°C  → 0x32 (50 decimal)
-- -10°C → 0x28 (40 decimal)
-- 100°F → 0x78 (120 decimal)
-```
-
-**Device-side Display Logic**:
-- Decode: Display_Temp = Raw_Value - 50
-- Format with appropriate symbol (°F or °C) based on config
-- Typical range: -40 to +50 Celsius (-40 to +122°F)
-
-## Power Management
-
-### USB Power Draw
-- Idle: ~50-100 mA
-- Active display: ~100-150 mA
-- Peak (all segments lit): ~200 mA
-
-### Power-down Sequence
-- Device monitors USB VBUS for disconnection
-- Auto-shutdown after ~2 seconds of VBUS loss
-- No persistent state storage required
-- Automatic re-initialization on reconnection
-
-## Security Notes
-
-- **No encryption**: All data in plaintext
-- **No authentication**: No user/password required
-- **No firmware updates**: Device firmware appears static
-- **No configuration protection**: Settings accessible to any USB user
-- **Physical security**: Device can be unplugged anytime (graceful)
-
-## Testing & Validation
-
-### Hardware Setup
-```
-USB Host → USB Cable → Weather Dongle (CP2102) → LCD Display
-           (5V)
-```
-
-### Test Sequence
-1. Plug in device
-2. Run DeviceIni command
-3. Verify status returns 0x00
-4. Send test weather data
-5. Verify display updates
-6. Verify each field individually
-
-### Validation Packet Examples
-
-**Test 1: Initialization**
-```
-Send:    04 00
-Receive: 00 00
-Expected: Display clears, device ready
-```
-
-**Test 2: Status Check**
-```
-Send:    03 00
-Receive: 00 01 3F
-Expected: Device reports ready (0x3F = all flags set)
-```
-
-**Test 3: Weather Update**
-```
-Send:    02 08 52 41 01 64 00 B4 00
-         (22°C, 65% RH, Sunny, 10 m/s from south)
-Receive: 00 00
-Expected: LCD updates with weather info
-```
-
----
-
-**Protocol Version**: 1.0  
-**Last Updated**: 2026-08-12  
+**Last Updated**: 2026-09-18
 **Reverse Engineering Status**: 70% Confidence  
 **Implementation Status**: Ready for Phase 3

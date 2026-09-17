@@ -60,5 +60,7 @@
       "charliermarsh.ruff",
       "llvm-vs-code-extensions.vscode-clangd"
     ]
-  }
+  },
+  "ghidramcp.bridgeScriptPath": "C:\\Users\\rmonn\\bin\\bridge_mcp_ghidra.py",
+  "python.analysis.typeCheckingMode": "strict"
 }

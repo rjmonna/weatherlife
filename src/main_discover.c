@@ -2,6 +2,8 @@
 // Main executable to discover and test weather device
 
 #include "usb_device.h"
+#include "device_registration.h"
+#include "weather_frame.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +20,42 @@ int main(int argc, char* argv[])
 {
     bool replay_observed_frame = argc > 1 &&
                                  strcmp(argv[1], "--replay-observed-frame") == 0;
+    bool print_registration_frame = argc > 1 &&
+                                    strcmp(argv[1], "--print-registration-frame") == 0;
+    bool print_weather_frame = argc > 1 &&
+                              strcmp(argv[1], "--print-weather-frame") == 0;
+
+    if (print_weather_frame) {
+        WeatherFrameInput sample = {
+            .time = {.month = 9, .day = 17, .hour = 14, .minute = 30},
+            .current_temperature_c = 17.5f,
+            .uv_index = 3,
+            .high_temperature_c = {20.0f, 18.0f, 19.0f, 21.0f, 17.0f},
+            .low_temperature_c = {12.0f, 11.0f, 10.0f, 13.0f, 9.0f}
+        };
+        uint8_t frame[WEATHER_FRAME_SIZE];
+        if (!weather_frame_build(&sample, frame)) {
+            printf("[-] Could not build weather frame\n");
+            return 1;
+        }
+        printf("frame:");
+        for (int i = 0; i < WEATHER_FRAME_SIZE; i++) printf(" %02x", frame[i]);
+        printf("\n");
+        return 0;
+    }
+
+    if (print_registration_frame) {
+        WeatherRegistrationId id;
+        uint8_t frame[WEATHER_REGISTRATION_FRAME_SIZE];
+        weather_registration_generate_id(&id);
+        weather_registration_build_frame(&id, frame);
+        printf("id nibbles:");
+        for (int i = 0; i < WEATHER_REGISTRATION_ID_NIBBLES; i++) printf(" %x", id.nibbles[i]);
+        printf("\nframe:");
+        for (int i = 0; i < WEATHER_REGISTRATION_FRAME_SIZE; i++) printf(" %02x", frame[i]);
+        printf("\n");
+        return 0;
+    }
 
     printf("="
 );
@@ -99,10 +137,10 @@ int main(int argc, char* argv[])
     }
 
     if (replay_observed_frame) {
-        if (usb_send_observed_display_frame(&device)) {
-            printf("[+] Replayed the observed 17-byte display frame\n");
+        if (usb_replay_captured_registration_frame(&device)) {
+            printf("[+] Replayed the captured registration-handshake frame\n");
         } else {
-            printf("[-] Could not replay the observed display frame\n");
+            printf("[-] Registration replay is disabled until transport framing is proven\n");
         }
         usb_close(&device);
         backend->free_device_list(devices);

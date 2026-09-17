@@ -9,15 +9,15 @@ Convert Weather-Life (defunct weather dongle software from weather-life.com) int
 ## 📊 Status
 
 - ✅ **Phase 1**: Binary analysis complete (weather.exe, usbwr.exe, usbwr.dll, onlywell.dll)
-- ✅ **Phase 2**: USB protocol mapped (Silicon Labs CP2102, commands: CAL_USB_READ/WRITE/STATUS)
+- ✅ **Phase 2**: Tenx HID target mapped (VID:PID `0x1130:0x0202`; commands remain under investigation)
 - 🔄 **Phase 3**: C/Rust implementation in progress
 - ⏳ **Phase 4**: Cross-platform testing and integration
 
 ## 📊 What We Discovered
 
 ### Hardware Identified
-- **Device Interface**: Silicon Labs CP210x USB-to-Serial (VID: `0x10c4`, PID: `0xea60`)
-- **Alternative Support**: Microchip Technology (VID: `0x0424`) and FTDI (VID: `0x0403`)
+- **Device Interface**: Tenx composite HID (VID: `0x1130`, PID: `0x0202`)
+- **Required HID interfaces**: Usage Page `1`, Usage `0` and Usage `3`
 - **Display Type**: Likely 16x2 character LCD via USB HID
 - **Communication Protocol**: Custom binary USB protocol (CAL_USB_READ/WRITE/STATUS)
 
@@ -33,7 +33,7 @@ Original Application:
 Extracted Protocol:
 ├── USB Commands: CAL_USB_READ, CAL_USB_WRITE, CAL_USB_STATUS
 ├── Device Init: DeviceIni command
-├── Vendor IDs: Silicon Labs (0x10c4), Microchip (0x0424), FTDI (0x0403)
+├── Vendor ID: Tenx (0x1130), Product ID: 0x0202
 └── API Reference: Weather-life.com API structure (reverse engineered)
 ```
 
@@ -119,22 +119,41 @@ weather-life/
 
 ## 🔍 Passive Protocol Tracing
 
+All tracing and replay JSONL files belong in `traces/`, which is ignored by
+Git. The tracer defaults to `traces/weather-trace.jsonl`; use an explicit
+`--output .\traces\<name>.jsonl` for a named capture.
+
 On Windows, attach to the original application and save a local JSONL trace:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\trace_weatherlife.py --process weather --process usbwr --output .\weather-refresh-trace.jsonl
-.\.venv\Scripts\python.exe .\scripts\analyze_trace.py .\weather-refresh-trace.jsonl
+.\.venv\Scripts\python.exe .\scripts\trace_weatherlife.py --process weather --process usbwr --output .\traces\weather-refresh-trace.jsonl
+.\.venv\Scripts\python.exe .\scripts\analyze_trace.py .\traces\weather-refresh-trace.jsonl
 ```
 
 The analyzer reports exact observed frames and labels only the known polling
 frame. It does not assign meanings to unknown bytes.
+
+For the Device-button registration capture, run:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\analyze_trace.py .\traces\device-registration-trace.jsonl
+```
+
+The analyzer reports registration writes, low-level return counts, polling
+counts, distinct 17-byte reports, and whether a non-default registration echo
+was observed. In the captured run, 19 writes succeeded but all 6,624 feature
+poll responses remained all-`0x10`, so registration did not complete.
+
+Registration-frame generation remains offline-only. The native discoverer
+refuses to replay registration until the `onlywell.dll` transport framing and
+response path are proven.
 
 To replay an archived Weather-Life response through the original parser, serve
 the backup tree locally and redirect only the legacy URL:
 
 ```powershell
 python -m http.server 8765 --bind 127.0.0.1 --directory C:\Users\rmonn\OneDrive\Backup\www.weather-life.com
-.\.venv\Scripts\python.exe .\scripts\trace_weatherlife.py --process weather --process usbwr --redirect-base http://127.0.0.1:8765 --output .\weather-fake-response-trace.jsonl
+.\.venv\Scripts\python.exe .\scripts\trace_weatherlife.py --process weather --process usbwr --redirect-base http://127.0.0.1:8765 --output .\traces\weather-fake-response-trace.jsonl
 ```
 
 ## 🔧 USB Protocol Details
@@ -175,6 +194,19 @@ and five-day forecasts. It requires no API key.
 ```powershell
 .\.venv\Scripts\python.exe .\python\weather_provider.py
 ```
+
+Select a city from the installed Weather-Life country/city table and fetch
+its weather through Open-Meteo:
+
+```powershell
+.\.venv\Scripts\python.exe .\python\weather_provider.py `
+  --country Netherlands `
+  --city Rotterdam `
+  --city-code 06344
+```
+
+The legacy city code (`06344`) is kept separate from Open-Meteo's location ID.
+Use `--city-table` to provide a different `images\cty` table.
 
 The provider can also be used by the replacement application:
 
@@ -248,7 +280,7 @@ make
 
 ### To Use Weather-Life
 - **Compatible USB Device**:
-  - Silicon Labs CP2102 (most likely)
+  - Tenx composite HID (`0x1130:0x0202`)
   - Microchip USB Bridge
   - FTDI FT232R
 - **USB Cable** (Type A to whatever your dongle has)

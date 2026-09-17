@@ -74,6 +74,11 @@ bool weather_parse_legacy_current(const char* response, size_t response_length,
         data->pressure = (int)value;
     }
 
+    record = find_record(response, response_length, "RAINMS");
+    if (record && parse_numeric_value(record, &value)) {
+        data->precipitation = (float)value;
+    }
+
     // WEA/icon and forecast fields require a separately verified mapping.
     data->weather_code = 0;
     return have_temperature && have_humidity;

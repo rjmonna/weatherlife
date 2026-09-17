@@ -21,18 +21,12 @@ class WeatherDeviceDiscovery:
     
     # Known device identifiers from binary analysis
     KNOWN_DEVICES = [
-        # Silicon Labs - MOST LIKELY (dominant in binaries)
+        # Confirmed onlywell.dll HID target.
         {
-            'vid': 0x10c4,
-            'pid': 0xea60,
-            'name': 'Silicon Labs CP2102',
-            'description': 'USB-to-Serial (most common weather device)'
-        },
-        {
-            'vid': 0x10c4,
-            'pid': 0xea61,
-            'name': 'Silicon Labs CP2103',
-            'description': 'USB-to-Serial variant'
+            'vid': 0x1130,
+            'pid': 0x0202,
+            'name': 'Tenx HID',
+            'description': 'Composite HID device; requires Usage 0 and Usage 3'
         },
         
         # Microchip Technology

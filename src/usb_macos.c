@@ -15,9 +15,8 @@
 
 // Known Weather Device IDs (same as Windows/Linux)
 static WeatherDeviceID known_devices[] = {
+    {0x1130, 0x0202, "Tenx HID", "Composite HID device with Usage 0 and Usage 3"},
     {0x0424, 0x274a, "Microchip USB Bridge", "Possible weather device variant 1"},
-    {0x10c4, 0xea60, "Silicon Labs CP210x", "USB to Serial (weather data interface)"},
-    {0x10c4, 0xea61, "Silicon Labs CP2103", "USB to Serial variant"},
     {0x1209, 0x0001, "InterBiometrics Generic", "Open vendor ID for DIY devices"},
     {0x16c0, 0x0483, "Van Ooijen Technische", "DIY USB device"},
     {0x067b, 0x2303, "Prolific PL2303", "USB Serial adapter for weather"},

@@ -1,9 +1,17 @@
 *.obj
 *.pdb
 *.pyc
+*.exe
+*.log
+
 
 build/
 .cmake-validation/
+traces/
 
 weather-refresh-trace.jsonl
 weather-*-trace.jsonl
+
+.weather-fixture/
+
+.cmake-tests/

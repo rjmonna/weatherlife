@@ -25,6 +25,53 @@ class LegacyWeatherDocument:
     daily: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class LegacyCity:
+    """One country, city, and legacy Weather-Life city code."""
+
+    country: str
+    name: str
+    city_code: str
+
+
+def parse_city_table(text: str) -> list[LegacyCity]:
+    """Parse the installed Weather-Life country and city table."""
+    cities = []
+    country: Optional[str] = None
+
+    lines = text.splitlines()
+    line_number = 0
+    while line_number < len(lines):
+        raw_line = lines[line_number]
+        line_number += 1
+        line = raw_line.strip()
+        if not line or line.startswith(";") or line.startswith("#"):
+            continue
+        if line.startswith('"') and "=" not in line and line_number < len(lines):
+            continuation = lines[line_number].strip()
+            if continuation.startswith("="):
+                line = line[1:] + continuation.rstrip('"')
+                line_number += 1
+        if line.startswith("[") and line.endswith("]"):
+            country = line[1:-1].strip()
+            if not country:
+                raise ValueError(f"Empty country on line {line_number}")
+            continue
+        if "=" not in line or country is None:
+            raise ValueError(f"Unrecognized city-table record on line {line_number}: {raw_line!r}")
+        name, city_code = (part.strip() for part in line.split("=", 1))
+        if not name or not city_code:
+            raise ValueError(f"Invalid city-table record on line {line_number}")
+        cities.append(LegacyCity(country, name, city_code))
+    return cities
+
+
+def read_city_table(path: str) -> list[LegacyCity]:
+    """Read the installed Weather-Life country and city table."""
+    with open(path, encoding="ascii") as city_file:
+        return parse_city_table(city_file.read())
+
+
 def parse_legacy_weather(text: str) -> LegacyWeatherDocument:
     """Parse the named-record format served by the legacy city endpoint."""
     document = LegacyWeatherDocument()

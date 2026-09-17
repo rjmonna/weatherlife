@@ -1,37 +1,39 @@
 cmake_minimum_required(VERSION 3.10)
 project(weather-life C)
 
+include(CTest)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Detect platform
+set(COMMON_SOURCES
+    src/usb_device.h
+    src/usb_common.c
+    src/weather_response.h
+    src/weather_response.c
+    src/device_registration.h
+    src/device_registration.c
+    src/bit_packer.h
+    src/bit_packer.c
+    src/weather_frame.h
+    src/weather_frame.c
+)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(PLATFORM "WINDOWS")
-    set(SOURCES 
-        src/usb_device.h
-        src/weather_response.h
-        src/weather_response.c
-        src/usb_windows.c
-        src/usb_common.c
-    )
+    set(SOURCES ${COMMON_SOURCES} src/usb_windows.c)
     set(LIBS setupapi hid)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PLATFORM "LINUX")
-    set(SOURCES
-        src/usb_device.h
-        src/usb_linux.c
-        src/usb_common.c
-    )
+    set(SOURCES ${COMMON_SOURCES} src/usb_linux.c)
     find_package(libusb-1.0 REQUIRED)
     set(LIBS ${LIBUSB_LIBRARIES})
     include_directories(${LIBUSB_INCLUDE_DIRS})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(PLATFORM "MACOS")
-    set(SOURCES
-        src/usb_device.h
-        src/usb_macos.c
-        src/usb_common.c
-    )
+    set(SOURCES ${COMMON_SOURCES} src/usb_macos.c)
     set(LIBS
         "-framework IOKit"
         "-framework CoreFoundation"
@@ -46,13 +48,27 @@ target_link_libraries(weather-life-usb ${LIBS})
 add_executable(weather-life-discover src/main_discover.c)
 target_link_libraries(weather-life-discover weather-life-usb)
 
+if(BUILD_TESTING)
+    add_executable(weather-life-native-tests tests/test_native.c)
+    target_include_directories(weather-life-native-tests PRIVATE src)
+    target_link_libraries(weather-life-native-tests weather-life-usb)
+    if(NOT WIN32)
+        target_link_libraries(weather-life-native-tests m)
+    endif()
+    add_test(NAME native-unit-tests COMMAND weather-life-native-tests)
+    add_test(NAME python-unit-tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p test_python.py)
+    set_tests_properties(python-unit-tests PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 # Weather provider library (to be added)
 # add_subdirectory(src/weather)
 
 # Installation
 install(TARGETS weather-life-discover DESTINATION bin)
 install(TARGETS weather-life-usb DESTINATION lib)
-install(FILES src/usb_device.h DESTINATION include)
+install(FILES src/usb_device.h src/weather_response.h src/device_registration.h src/bit_packer.h src/weather_frame.h DESTINATION include)
 
 message(STATUS "Building for platform: ${PLATFORM}")
 message(STATUS "C Compiler: ${CMAKE_C_COMPILER}")

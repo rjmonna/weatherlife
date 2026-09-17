@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterable
 
 
 POLL_FRAME = "00 55 53 42 43 00 10 01 00"
+WRITE_COMMAND_FRAME = "00 55 53 42 43 00 10 02 00"
+DEFAULT_FEATURE_REPORT = "00" + " 10" * 16
 
 
 def load_events(path: Path) -> Iterable[Dict[str, Any]]:
@@ -60,6 +62,52 @@ def summarize(events: Iterable[Dict[str, Any]]) -> None:
         print("HID feature reports:")
         for report, count in reports.most_common():
             print(f"  {count:5d} {report}")
+
+    registration_writes = [
+        event for event in event_list
+        if event.get("api") == "WriteFile"
+        and event.get("length") == 17
+        and "CAL_USB_WRITE" in " ".join(event.get("stack", []))
+    ]
+    registration_calls = [
+        event for event in event_list
+        if event.get("api") == "CAL_USB_WRITE-call"
+    ]
+    registration_returns = [
+        event for event in event_list
+        if event.get("api") == "CAL_USB_WRITE-return"
+    ]
+    polls = [
+        event for event in event_list
+        if event.get("api") == "WriteFile"
+        and event.get("buffer") == POLL_FRAME
+    ]
+    command_writes = [
+        event for event in event_list
+        if event.get("api") == "WriteFile"
+        and event.get("buffer") == WRITE_COMMAND_FRAME
+    ]
+    if registration_writes or registration_calls:
+        print("Registration analysis:")
+        print(f"  CAL_USB_WRITE calls: {len(registration_calls)}")
+        print(f"  CAL_USB_WRITE returns: {len(registration_returns)}")
+        print(f"  17-byte HID writes: {len(registration_writes)}")
+        print(f"  command-2 writes: {len(command_writes)}")
+        print(f"  read-poll writes: {len(polls)}")
+
+        payloads = Counter(event.get("buffer", "") for event in registration_writes)
+        for payload, count in payloads.most_common():
+            print(f"  registration report ({count}): {payload}")
+
+        if polls and reports:
+            nonzero_reports = [
+                report for report in reports
+                if report != DEFAULT_FEATURE_REPORT
+            ]
+            if not nonzero_reports:
+                print("  result: no registration echo; feature reads stayed at all-0x10")
+            else:
+                print("  result: non-default feature response observed")
 
 
 def main() -> None:

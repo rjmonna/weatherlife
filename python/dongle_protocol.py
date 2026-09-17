@@ -1,131 +1,84 @@
-"""Observed serial operations for the Weather-Life dongle.
+"""Offline registration-frame utilities for the Weather-Life HID path.
 
-Only byte sequences captured from the original application are implemented here.
-The display frame is preserved as an observed transaction, not decoded weather
-payload.
+The CAL_USB_READ poll frame and the registration-handshake algorithm below
+were confirmed by decompiling usbwr.dll!usbdeviceread with GhidraMCP on
+2026-09-17 (see docs/REVERSE_ENGINEERING.md). onlywell.dll, which actually owns
+the wire framing, has not been decompiled yet.
 """
 
-from contextlib import AbstractContextManager
 import argparse
+import random
 import time
-from typing import Optional
-
-import serial
+from typing import List
 
 
-DEFAULT_PORT = "COM4"
-DEFAULT_BAUDRATE = 115200
-
-# Captured from usbwr.exe while polling the connected device.
-CAL_USB_READ_FRAME = bytes.fromhex("00 55 53 42 43 00 10 01 00")
-
-# Captured next to a refresh operation. Field meanings are unknown.
-OBSERVED_DISPLAY_FRAME = bytes.fromhex(
-    "00 10 14 10 10 10 10 10 10 14 10 10 10 10 16 15 1f"
-)
-
-# Captured alongside the display frame. Meaning is not yet assigned.
-OBSERVED_WRITE_CONTROL_FRAME = bytes.fromhex("00 55 53 42 43 00 10 02 00")
+REGISTRATION_ID_NIBBLES = 10
+REGISTRATION_FRAME_SIZE = 16
 
 
-class DongleProtocol(AbstractContextManager):
-    """Access the observed CP2102 serial protocol without guessing fields."""
+def _crc8_table(polynomial: int = 0x31) -> List[int]:
+    """Standard CRC-8 table, MSB-first. Verified against usbwr.dll's embedded
+    table (e.g. table[0x8c] == 0x07)."""
+    table = []
+    for value in range(256):
+        for _ in range(8):
+            value = ((value << 1) ^ polynomial) & 0xFF if value & 0x80 else (value << 1) & 0xFF
+        table.append(value)
+    return table
 
-    def __init__(
-        self,
-        port: str = DEFAULT_PORT,
-        baudrate: int = DEFAULT_BAUDRATE,
-        timeout: float = 1.0,
-    ) -> None:
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
-        self._serial: Optional[serial.Serial] = None
 
-    def open(self) -> None:
-        """Open the dongle using the captured 115200 8N1 settings."""
-        if self._serial is None:
-            self._serial = serial.Serial(
-                self.port,
-                baudrate=self.baudrate,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=self.timeout,
-                write_timeout=self.timeout,
-            )
+_CRC8_TABLE = _crc8_table()
 
-    def close(self) -> None:
-        """Close the serial port if it is open."""
-        if self._serial is not None:
-            self._serial.close()
-            self._serial = None
 
-    def __exit__(self, exception_type, exception_value, traceback) -> None:
-        self.close()
+def generate_registration_id() -> List[int]:
+    """Mirror thunk_FUN_10001650: an ASCII "%x%04x" of (ms&0xf, rand()&0x7fff),
+    nibble-expanded one hex character at a time."""
+    code = f"{int(time.time() * 1000) & 0xf:x}{random.randint(0, 0x7fff):04x}"
+    nibbles = []
+    for char in code[:5]:
+        byte = ord(char)
+        nibbles.append((byte >> 4) & 0xF)
+        nibbles.append(byte & 0xF)
+    return nibbles
 
-    def _write(self, frame: bytes) -> None:
-        if self._serial is None:
-            raise RuntimeError("dongle is not open")
-        self._serial.write(frame)
-        self._serial.flush()
 
-    def read_poll(self, settle_time: float = 0.1) -> bytes:
-        """Send the confirmed CAL_USB_READ frame and return available bytes."""
-        self._write(CAL_USB_READ_FRAME)
-        time.sleep(settle_time)
-        return self.read_available()
+def build_registration_frame(id_nibbles: List[int]) -> bytes:
+    """Mirror usbwr.dll!usbdeviceread's CAL_USB_WRITE payload construction."""
+    if len(id_nibbles) != REGISTRATION_ID_NIBBLES:
+        raise ValueError(f"expected {REGISTRATION_ID_NIBBLES} id nibbles")
+    frame = bytearray([0x10] * REGISTRATION_FRAME_SIZE)
+    frame[1] |= 0x08
+    for i, nibble in enumerate(id_nibbles):
+        frame[i + 2] |= nibble
 
-    def send_observed_display_frame(self) -> None:
-        """Replay the captured 17-byte frame once.
+    checksum = 0
+    for i in range(7):
+        reconstructed = ((frame[i * 2] << 4) | (frame[i * 2 + 1] & 0xF)) & 0xFF
+        checksum ^= _CRC8_TABLE[reconstructed]
+    frame[14] |= 0x10 | ((checksum >> 4) & 0xF)
+    frame[15] |= checksum & 0xF
+    return bytes(frame)
 
-        This does not claim to encode weather data. It is intended only for
-        reproducing the captured original-application transaction.
-        """
-        self._write(OBSERVED_DISPLAY_FRAME)
 
-    def send_observed_control_frame(self) -> None:
-        """Replay the captured adjacent 9-byte control frame once."""
-        self._write(OBSERVED_WRITE_CONTROL_FRAME)
-
-    def read_available(self) -> bytes:
-        """Read bytes currently available without issuing another command."""
-        if self._serial is None:
-            raise RuntimeError("dongle is not open")
-        waiting = self._serial.in_waiting
-        return self._serial.read(waiting) if waiting else b""
+def response_matches(decoded: bytes, id_nibbles: List[int]) -> bool:
+    """decoded must already be masked with & 0xf per byte (device echo)."""
+    if decoded[0] != 0 or decoded[1] != 9:
+        return False
+    return list(decoded[2:2 + REGISTRATION_ID_NIBBLES]) == id_nibbles
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", default=DEFAULT_PORT)
-    parser.add_argument("--poll", action="store_true", help="send the observed CAL_USB_READ frame")
     parser.add_argument(
-        "--send-observed-frame",
-        action="store_true",
-        help="replay the captured 17-byte display transaction once",
-    )
-    parser.add_argument(
-        "--send-observed-control",
-        action="store_true",
-        help="replay the captured adjacent control frame once",
+        "--build-registration-frame",
+        action="store_true", required=True,
+        help="generate and print a fresh registration frame without hardware",
     )
     args = parser.parse_args()
-    actions = sum((args.poll, args.send_observed_frame, args.send_observed_control))
-    if actions != 1:
-        parser.error("choose exactly one operation")
-
-    with DongleProtocol(port=args.port) as dongle:
-        dongle.open()
-        if args.poll:
-            response = dongle.read_poll()
-            print(response.hex(" ") or "<no response>")
-        elif args.send_observed_frame:
-            dongle.send_observed_display_frame()
-            print(OBSERVED_DISPLAY_FRAME.hex(" "))
-        else:
-            dongle.send_observed_control_frame()
-            print(OBSERVED_WRITE_CONTROL_FRAME.hex(" "))
+    id_nibbles = generate_registration_id()
+    frame = build_registration_frame(id_nibbles)
+    print("id nibbles:", " ".join(f"{n:x}" for n in id_nibbles))
+    print("frame:", frame.hex(" "))
 
 
 if __name__ == "__main__":
