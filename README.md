@@ -148,6 +148,23 @@ Registration-frame generation remains offline-only. The native discoverer
 refuses to replay registration until the `onlywell.dll` transport framing and
 response path are proven.
 
+### Tenx HID experiments
+
+`python/experiment_tenx.py` sends user-supplied feature-report bytes only to
+the Tenx VID/PID `1130:0202`, Usage Page 1 / Usage 0 HID interface. It does not
+encode protocol commands. It defaults to a dry run; to send, install `hidapi`,
+then provide `--send` and the full report size (including the report ID):
+
+```bash
+python -m pip install hidapi
+python python/experiment_tenx.py --payload "55 53 42" --report-id 0 --report-size 9 --send
+```
+
+The payload excludes the report ID. The utility prefixes the ID and zero-pads
+the report to the explicitly supplied size. Start without `--send` to inspect
+the exact bytes that would be transmitted. No command semantics or expected
+device response are implied.
+
 To replay an archived Weather-Life response through the original parser, serve
 the backup tree locally and redirect only the legacy URL:
 

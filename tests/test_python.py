@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "python"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from dongle_protocol import build_registration_frame, response_matches  # noqa: E402
+from experiment_tenx import build_feature_report, parse_hex_bytes  # noqa: E402
 from legacy_weather_csv import parse_city_table, parse_legacy_weather  # noqa: E402
 from weather_provider import (  # noqa: E402
     CurrentWeather,
@@ -41,6 +42,28 @@ class DongleProtocolTests(unittest.TestCase):
         self.assertTrue(response_matches(response, identifier))
         self.assertFalse(response_matches(bytes([1, *response[1:]]), identifier))
         self.assertFalse(response_matches(response, identifier[:-1]))
+
+
+class TenxExperimentTests(unittest.TestCase):
+    def test_hex_payload_accepts_contiguous_and_spaced_bytes(self):
+        expected = bytes.fromhex("55 53 42 43")
+        self.assertEqual(parse_hex_bytes("55534243"), expected)
+        self.assertEqual(parse_hex_bytes("55 53 42 43"), expected)
+
+    def test_feature_report_adds_id_and_pads_to_requested_size(self):
+        self.assertEqual(
+            build_feature_report(bytes.fromhex("55 53"), 0, 5),
+            bytes.fromhex("00 55 53 00 00"),
+        )
+
+    def test_feature_report_rejects_oversized_payload(self):
+        with self.assertRaises(ValueError):
+            build_feature_report(b"\x01\x02", 0, 2)
+
+    def test_hex_payload_rejects_incomplete_or_invalid_bytes(self):
+        for value in ("f", "gg", "123 45"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_hex_bytes(value)
 
 
 class LegacyWeatherTests(unittest.TestCase):
