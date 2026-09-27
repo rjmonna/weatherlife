@@ -657,10 +657,9 @@ local f55c..f534: 8, 0, 5, 7, 11, 11, 7, 8, 5, 5, 8
 ```
 
 The first two rows are 12-entry width families; the third is the daily
-family used by the nested forecast branches. They overlap the widths in the
-archived current and daily records, but the executable does not embed all
-record names, so these rows must not yet be relabeled as `TEMP`, `HUM`, `WEA`,
-or individual forecast fields.
+family used by nested forecast branches. The tables alone do not carry record
+names. Selector 6's specific record names can, however, be established from
+its pre-skip and the ordered `DAY1` fixture below.
 
 A separate 27-entry selector table at locals `f634..f5c8` is initialized as
 six zero entries followed by pairs `1,1`, `2,2`, through `10,10`, with a
@@ -679,11 +678,10 @@ and `FUN_0040b7c0` returns the record-data pointer at `+4`. Only `TEMPH` is
 present as a useful embedded key string. The remaining keys are loaded or
 constructed at runtime, so static string search cannot complete the mapping.
 
-This proves the non-clock dispatch and dynamic grouping mechanism. It does
-not yet prove the semantic name of every table slot, the absolute bit offset
-of each weather field, or the field list in the optional `0x40`-bit segment.
-Those require a controlled one-record-at-a-time fixture and a call-boundary
-capture of the resulting `CAL_USB_WRITE` buffers.
+This proves the non-clock dispatch and dynamic grouping mechanism. Selector
+6's field names, widths, and logical bit offsets are mapped below. Other
+selector families and the semantic meaning of the 40-bit prefix remain
+unresolved.
 
 ### Header Source and Record Mapping Proof (2026-09-27)
 
@@ -733,12 +731,10 @@ up to seven blocks. The constants are visible at `0x004478c0`
 `0x004478d4` (`TEMP`), and `0x00447330` (`WS`). This proves the parser record
 mapping, independent of archive record order.
 
-What remains unproven is narrower than before: which semantic meaning the
-40 header bytes have, how those bytes relate to the 20-bit/other packed fields,
-and the exact field-to-bit mapping at the `CAL_USB_WRITE` boundary. Those
-require changing one of the source records in `weather.dat` at a time and
-capturing the resulting native buffer; existing traces change multiple inputs
-and cannot distinguish those owners.
+The 40-bit prefix's semantic meaning and a few selector-6 value conversions
+remain open. The selector-6 field positions and widths are resolved below
+from the stream skip, ordered fixture, append calls, and checksum boundary;
+they do not depend on a runtime byte-difference capture.
 
 ### Archive Fixture Cross-Check (2026-09-17)
 
@@ -756,32 +752,68 @@ The fixture also confirms the documented widths for these records (`UPD=20`,
 four component widths add to 20 bits and match the four case-5 append widths
 exactly, providing an independent archive-to-assembly cross-check.
 
-The branch then sets a packed length of `0x80` bits, copies/sends that segment in 16-byte
-chunks, and conditionally constructs a separate `0x40`-bit segment. This is
-why the append sequence must not be treated as a simple 16-byte field list:
-the cursor is nibble-oriented and the branch contains headers, conditional
-year pieces, local date/time fields, and parser-derived `UPD` values. The exact
-current-condition and forecast field order remains unresolved; the archive
-record order must not be substituted for the native case-5 order.
+The serializer sets selector 6's primary segment length to `0x80` bits. The
+archived service-record widths are not the native output widths: selector 6
+uses its own per-slot conversion and append lengths. Its exact block is mapped
+below. A separate `0x40`-bit path exists; its full semantic field list remains
+unresolved.
 
-The transport offset is proven, but this does not yet prove the byte offsets
-of individual weather fields within the 16-byte and 8-byte serializer payloads
-or the exact order of the current-condition fields. The signed temperature
-encoding is now confirmed: the original handler parses the
-integer part, rounds up when the first fractional digit is at least 5, and
-stores negative values as 9-bit two's-complement values (`0x200 - magnitude`).
-The two daily temperature fields are each appended as 9 bits. `src/weather_frame.h`
-exposes the verified dispatch constants, while `src/weather_frame.c` remains an
-experimental candidate encoder until absolute offsets and segmentation are
-traced. Live transmission is disabled while those mappings remain unresolved;
-only the proven cursor and `UPD` shell is available for offline inspection.
+### Selector-6 Day-1 Field Layout (2026-09-27)
 
-**Still open**: the exact byte offsets of every remaining field within the
-16-byte "today" and 8-byte second segment (high-confidence but not yet
-individually assembly-verified beyond UPD), and the other ~19 dispatch cases
-in `FUN_00401400`. End-to-end replay now proves that the archived weather
-response reaches the DeskWeather display through the original parser and
-serializer, but it does not by itself identify each field's bit offset.
+This mapping is established by four independent parts of the executable:
+
+- The input stream is rewound; the first line supplies the city header, then
+  `DES` and `CITY_AND_WMO` are consumed. The stream is positioned at `UPD`.
+- For selector 6, `local_638[6]` is 1. `FUN_0040d850` skips the current
+  blank-separated record group. `local_6a8[6]` is 0, so no additional records
+  are skipped. The loop ignores the `DAY1 yyyymmdd` line because it contains
+  no `<...>` value and starts at `TEMPH`.
+- The selector-6 switch increments `local_534` once per record. Its twelve
+  cases match the ordered Day-1 fixture records through `AFHUM`; case 6
+  consumes `HUM` but appends zero bits.
+- The append widths total 79 bits. With the cursor at logical bit 40, the
+  fields end at bit 119. One pad bit completes the first 120 data bits; the
+  checksum helper then appends the 8-bit check value.
+
+Offsets below are zero-based logical bit offsets in the decoded 16-byte
+segment. The packer is MSB-first. In the HID working buffer, each logical
+nibble is stored in one byte with a `0x10` prefix, so physical cell 10 / mask
+index 4 corresponds to logical bit 40.
+
+| Slot | Day-1 record | Start bit | Bits | Native conversion/append behavior |
+| ---: | --- | ---: | ---: | --- |
+| 0 | `TEMPH` | 40 | 9 | Rounded signed-temperature encoder |
+| 1 | `TEMPL` | 49 | 9 | Float-to-integer conversion, then shared temperature encoder |
+| 2 | `MORING_ICON` | 58 | 7 | Index in 79-entry icon-name table; unknown maps to 79 |
+| 3 | `WS` | 65 | 11 | Decimal suffix is discarded; integer is packed in 11 bits |
+| 4 | `WBFT` | 76 | 2 | Numeric value, low 2 bits |
+| 5 | `WW` | 78 | 8 | Numeric/sentinel conversion |
+| 6 | `HUM` | 86 | 0 | Record consumed, no bits appended |
+| 7 | `AFTERNOON_N` | 86 | 5 | Result from unresolved helper `func_0x0040105a` |
+| 8 | `AFWS` | 91 | 7 | Numeric value, 7-bit append |
+| 9 | `AFBFT` | 98 | 8 | Decimal/digit conversion, 8-bit append |
+| 10 | `AFWW` | 106 | 5 | Numeric/sentinel conversion |
+| 11 | `AFHUM` | 111 | 8 | Signed value with high-bit sign flag; positive values clamp to 127 |
+
+The fields occupy logical bits 40..118 (79 bits). Logical bit 119 is padding,
+and logical byte 15 is the checksum. `FUN_0040bc70(buffer, ..., 0x80)`
+reconstructs the first 15 logical bytes from 30 nibble cells, computes the
+table-based check, and stores it in cells 30 and 31. The 128-bit segment is
+therefore 16 logical bytes represented by 32 nibble cells. `CAL_USB_WRITE`
+copies 16 cells per call, so this segment is sent in two writes at buffer
+offsets 0 and 16. The separate `0x40`-bit path occupies 16 nibble cells and
+uses one write.
+
+The names and positions above are proven for selector 6, but this is a Day-1
+morning/afternoon block, not the current-condition block. The 40-bit prefix,
+the conversion helper for `AFTERNOON_N`, and the other selector families
+remain unresolved. `src/weather_frame.c` remains an offline candidate and the
+live sender remains disabled.
+
+**Still open**: full current-condition and forecast coverage across the other
+selector families, meaning of the 40-bit prefix, exact conversion semantics
+for unresolved helpers, and runtime confirmation against a native
+`CAL_USB_WRITE` capture. No guessed data has been sent to the device.
 
 ### Refresh Capture (2026-09-08)
 
@@ -813,67 +845,42 @@ writes.
 `CAL_USB_STATUS()` at `0x10001ea0` calls `FUN_10001970`. That helper sends a
 zero-length `CAL_USB_READ` header through Usage 3, then calls
 `HidD_GetFeature` through Usage 0 with a 17-byte report buffer. The exported
-status function returns the first byte of that feature report, or `0xff` when
-the exchange fails.
+status function returns byte 0 of the buffer, or `0xff` when the exchange
+fails. Static analysis does not establish byte 0 as a device status code or
+acknowledgment; do not infer response semantics from the export name.
 
-`CAL_USB_READ(selector, buffer, length)` at `0x10001f60` sends the same header
-with a one-byte length and selector byte (`0`, `1`, or `2`), then reads the
-feature report. The header is wrapped in a zero-report-ID HID output report:
+`CAL_USB_READ(selector, buffer)` requests 16 payload bytes in the weather
+polling path. The common `onlywell.dll` helper constructs this exact
+zero-report-ID output report:
 
 ```
 [0]      Report ID: 0
-[1..4]   55 53 42 43 ("USBC")
-[5]      Reserved byte: 0
-[6]      Length, low byte
-[7]      Command: 1 (CAL_USB_READ)
-[8]      Selector: 0, 1, or 2
+[1..4]   55 53 42 43 (ASCII "USBC")
+[5..6]   Transfer length, unsigned 16-bit little-endian
+[7]      Operation: 1 = read, 2 = write
+[8]      Selector: input ASCII '0', '1', or '2' normalized to 0, 1, or 2
 ```
 
-The old `0x04 0x00` initialization request and `0x03 0x00` status request
-remain unsupported hypotheses and must not be sent.
+The transfer length is the number of data bytes, excluding the HID report-ID
+byte. The observed 16-byte read request is therefore
+`00 55 53 42 43 00 10 01 00`; a 16-byte write uses
+`00 55 53 42 43 00 10 02 00`. `CAL_USB_STATUS()` is a separate zero-length
+read operation, `00 55 53 42 43 00 00 01 00`. These examples establish the
+selector field's encoding, not what selector values mean to the device.
 
-### Command Structure
+For writes, `CAL_USB_WRITE` sends the 8-byte header through the Usage 3
+interface, then sends the 16-byte payload through Usage 0 as a separate
+17-byte output report: report ID `00` followed by the unchanged payload. For
+reads, the same header is sent through Usage 3, then `HidD_GetFeature` requests
+17 bytes through Usage 0: report ID `00` plus 16 response bytes. The exported
+read wrapper removes the report-ID byte and copies response data only up to
+the first zero byte, so its API is string-like rather than binary-safe.
 
-```
-REQUEST PACKET:
-[Byte 0] Command ID (CAL_USB_READ=0x01, CAL_USB_WRITE=0x02, etc.)
-[Byte 1] Data Length (0-255)
-[Bytes 2-N] Command Data
-
-RESPONSE PACKET:
-[Byte 0] Status Code (0x00=Success, non-zero=Error)
-[Bytes 1-N] Response Data
-```
-
-### Command Definitions
-
-#### 1. Device Initialization (DeviceIni)
-**Purpose**: Enumerate and open the two required HID interfaces. No wire command is sent.
-
-#### 2. Status Query (CAL_USB_STATUS)
-**Purpose**: Send a zero-length `CAL_USB_READ` header and return byte 0 of the 17-byte feature report.
-
-#### 3. Send Weather Data (CAL_USB_WRITE)
-**Purpose**: Display weather on LCD
-```
-Request:  0x02 <length> <weather_data>
-Response: 0x00 <ack>
-
-Weather Data Format (inferred):
-[Byte 0] Temperature (offset by 50 for negatives)
-[Byte 1] Humidity (0-100%)
-[Byte 2] Weather Code (bitmapped condition)
-[Bytes 3-4] Wind Speed (16-bit, scaled)
-[Bytes 5-6] Wind Direction (0-359 degrees)
-[Byte 7] Pressure (optional, hPa offset)
-```
-
-#### 4. Read Device Data (CAL_USB_READ)
-**Purpose**: Read sensor data or device state
-```
-Request:  0x01 0x00
-Response: 0x00 <device_data>
-```
+`DeviceIni()` only enumerates and opens the two HID interfaces. There is no
+evidence for the previously proposed generic command-plus-length packet,
+status-byte response, or byte-oriented temperature/humidity payload. The
+weather serializer's first 40 logical bits are still semantically unresolved;
+they must not be inferred from this separate HID control header.
 
 ### Display Format (16x2 LCD)
 

@@ -1,3 +1,7 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 199309L
+#endif
+
 // weather-life/src/main_discover.c
 // Main executable to discover and test weather device
 
@@ -12,8 +16,18 @@
     #include <windows.h>
     #define SLEEP(ms) Sleep(ms)
 #else
-    #include <unistd.h>
-    #define SLEEP(ms) usleep((ms) * 1000)
+    #include <errno.h>
+    #include <time.h>
+    static void sleep_ms(unsigned int milliseconds)
+    {
+        struct timespec delay = {
+            (time_t)(milliseconds / 1000),
+            (long)(milliseconds % 1000) * 1000000L
+        };
+        while (nanosleep(&delay, &delay) == -1 && errno == EINTR) {
+        }
+    }
+    #define SLEEP(ms) sleep_ms(ms)
 #endif
 
 int main(int argc, char* argv[])

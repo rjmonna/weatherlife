@@ -18,9 +18,12 @@ if host_os == 'windows'
   platform_libs = [win_deps, hid_dep]
 elif host_os == 'linux'
   platform = 'linux'
-  hidapi_dep = cc.find_library('hidapi', required: true)
+  hidapi_dep = dependency('hidapi-hidraw', required: false)
+  if not hidapi_dep.found()
+    hidapi_dep = dependency('hidapi-libusb', required: true)
+  endif
   platform_files = ['src/hid_transport.c', 'src/usb_linux.c']
-  platform_libs = [hidapi_dep]
+  platform_libs = [hidapi_dep, cc.find_library('m')]
 elif host_os == 'darwin'
   platform = 'macos'
   hidapi_dep = cc.find_library('hidapi', required: true)

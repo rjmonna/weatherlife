@@ -2,9 +2,10 @@
 
 **Device**: Tenx composite HID (`0x1130:0x0202`)  
 **Status**: Partially reverse engineered  
-**Confidence**: Discovery, registration framing, and end-to-end archived
-weather replay are confirmed; individual weather field semantics remain
-unconfirmed.
+**Confidence**: Discovery and registration framing are confirmed. The
+selector-6 Day-1 field order, native widths, bit offsets, nibble-cell encoding,
+and checksum boundary are statically proven; other weather selector semantics
+remain incomplete.
 
 ## Overview
 
@@ -45,6 +46,31 @@ The passive traces contain these facts only:
    producing a 17-byte data report. A second serializer segment is 8 bytes,
    but no standalone 16-byte or 8-byte weather report has yet been captured.
 
+Static decompilation of `onlywell.dll` proves the control-report layout. Each
+9-byte output report consists of a zero report ID followed by an 8-byte
+`USBC` header:
+
+```
+[0]      Report ID: 0
+[1..4]   ASCII "USBC"
+[5..6]   Transfer length in bytes, unsigned 16-bit little-endian
+[7]      Operation: 1 = read, 2 = write
+[8]      Selector: ASCII '0'/'1'/'2' normalized to 0/1/2
+```
+
+Thus a 16-byte read is `00 55 53 42 43 00 10 01 00`, a 16-byte write is
+`00 55 53 42 43 00 10 02 00`, and status polling is a zero-length read
+`00 55 53 42 43 00 00 01 00`. The selector encoding is proven, but the
+selector's device-level meaning is not. A write then sends a separate 17-byte
+output report (report ID `00` plus 16 unchanged payload bytes); a read obtains
+a 17-byte feature report and the exported wrapper removes its report-ID byte.
+That wrapper truncates returned data at the first zero byte, so it is not a
+binary-safe 16-byte read API.
+
+This `USBC` control header is transport framing, not the weather serializer's
+logical 40-bit prefix. The prefix semantics, full weather payload, and weather
+acknowledgment remain unproven; no guessed weather packet should be sent.
+
 ## Device-button registration capture
 
 The passive capture `traces/device-registration-trace.jsonl` recorded the original
@@ -77,10 +103,11 @@ Static analysis located a native serializer in `usbwr.exe`:
    4/5/5/6 bits, totaling 20 bits.
 - An archived `update/city/06344.csv` served locally through the original
    request path was accepted by `weather.exe`; the DeskWeather window displayed
-   data after the refresh. This proves the parser-to-serializer-to-device path,
-   but does not identify individual weather-field offsets.
-- Field order, absolute offsets, response semantics, condition-code values,
-   display formatting, and device acknowledgments remain unconfirmed.
+   data after the refresh.
+- Selector 6's exact Day-1 field order and logical offsets are statically
+   proven below. The current-condition group, other selectors, response
+   semantics, display formatting, and device acknowledgments remain
+   unconfirmed.
 
 ### Dispatch and runtime record lookup
 
@@ -91,18 +118,35 @@ The native serializer is a dispatcher rather than one straight field list.
 record groups through nested jump tables and feed converted text to the same
 MSB-first BitPacker.
 
+Selector 6 is proven to encode the Day-1 block beginning at `TEMPH`. Its
+decoded logical bit layout is `TEMPH(9), TEMPL(9), MORING_ICON(7), WS(11),
+WBFT(2), WW(8), HUM(0), AFTERNOON_N(5), AFWS(7), AFBFT(8), AFWW(5),
+AFHUM(8)`. These fields start at logical bit 40 and end at bit 119; bit 119
+is padding and logical byte 15 is the checksum. See
+`docs/REVERSE_ENGINEERING.md` for the selector pre-skip and per-slot encoding
+evidence.
+
+Each logical nibble is stored in a separate physical byte with a `0x10`
+prefix. Thus the 128-bit primary segment is 16 logical bytes / 32 physical
+nibble cells, sent as two 16-byte `CAL_USB_WRITE` payloads. The 64-bit
+secondary segment is 8 logical bytes / 16 nibble cells, sent once.
+
 The record names are resolved dynamically. The native parser searches keys
 with a seven-byte stride, reads five current sub-fields and four sub-fields
 for each daily block, and can produce seven daily temperature-like values.
 A 27-entry local selector table groups the current records and paired daily
 records. Only `TEMPH` is embedded as a useful key string; the other names are
 loaded or assembled at runtime. The initialized width tables are therefore
-strong evidence for wire widths, but are not sufficient to assign every slot
-to `TEMP`, `HUM`, `WEA`, or a forecast field.
+strong evidence for wire widths, but do not label slots by themselves. The
+selector-6 Day-1 mapping below is established separately from its group-skip
+logic and the ordered archived fixture; the other selector families remain
+unmapped.
 
-The exact semantic mapping still requires controlled legacy fixtures that
-change one named record at a time and capture the corresponding native
-`CAL_USB_WRITE` buffer.
+The selector-6 mapping is a static proof from the executable's group-skip
+logic, ordered archived fixture, per-slot conversion and append calls, and
+checksum boundary. The 40-bit prefix meaning, current-condition group, other
+forecast selectors, and several helper conversions remain unproven. No
+`CAL_USB_WRITE` weather buffer has been captured at runtime.
 
 Do not use a byte-oriented command-plus-length payload as an implementation
 contract. The original weather path is a bit-packed
@@ -110,12 +154,12 @@ serializer and must first be captured at the `CAL_USB_WRITE` call boundary.
 
 ## Evidence standard
 
-Treat a field mapping as confirmed only when a controlled fixture changes one
-legacy record at a time and the corresponding serializer bits change at the
-expected location. Keep raw traces and the fixture used for each comparison.
-The native client therefore refuses to send the old guessed byte-oriented
-weather packet. Keep replay and differential tracing passive until field
-offsets are mapped.
+Treat mappings established by static control/dataflow and fixture alignment as
+confirmed only for the traced selector and records. Use controlled one-record
+changes plus a native `CAL_USB_WRITE` capture to validate value semantics and
+other selectors. The native client therefore continues to refuse weather
+transmission; the proven selector-6 layout does not establish a complete
+display-ready packet or header.
 
 **Last Updated**: 2026-09-18
 **Reverse Engineering Status**: 70% Confidence  

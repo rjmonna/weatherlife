@@ -51,6 +51,8 @@ bool weather_frame_begin_native_primary(BitPacker* packer,
     if (!packer || !frame) return false;
 
     frame[1] |= 0x07;
+        memset(frame + WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET, 0x10,
+            WEATHER_FRAME_SIZE - WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET);
     bit_packer_init_at(packer, frame, WEATHER_FRAME_SIZE,
                        WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET,
                        WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET);
