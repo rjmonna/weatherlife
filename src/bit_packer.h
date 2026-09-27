@@ -15,9 +15,16 @@ typedef struct {
     uint8_t* buffer;
     size_t buffer_size;
     size_t bit_position;
+    size_t native_byte_offset;
+    int native_bit_offset;
+    int native_cursor;
 } BitPacker;
 
 void bit_packer_init(BitPacker* packer, uint8_t* buffer, size_t buffer_size);
+
+// Starts at an existing MSB-first byte/bit cursor, matching FUN_0040d340.
+void bit_packer_init_at(BitPacker* packer, uint8_t* buffer, size_t buffer_size,
+                        size_t byte_offset, int bit_offset);
 
 // Appends the low `bit_count` bits of `value` (bit_count <= 16), MSB-first.
 void bit_packer_append(BitPacker* packer, uint16_t value, int bit_count);

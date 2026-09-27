@@ -13,9 +13,30 @@ to changed fixture input.
 
 It does not yet prove the semantic owner, scaling, or absolute field mapping of
 those bits. Run `scripts/prove_encoder.py` for this transport-level check. The
-experimental `weather_frame_build()` remains unproven and must not be sent to
-the physical device until controlled one-field fixture captures establish its
-field order and offsets.
+confirmed `BitPacker` and standalone `UPD` append are safe for offline
+serialization tests. The composite `weather_frame_build()` remains unproven.
+The live USB send API refuses to transmit it until controlled one-field fixture
+captures establish its field order and offsets. The proven-only offline helper
+builds the native cursor boundary and `UPD` fields without claiming to produce
+a display-ready packet.
+
+### One-record native capture
+
+`traces/weather-call-boundary-trace.jsonl` is a minimal native weather capture:
+it contains one `CAL_USB_WRITE` call, one 17-byte weather report, and no
+registration retransmission. The original request opened the archived
+`06344.csv` URL. The serializer payload, excluding the HID report ID, is:
+
+```text
+10 14 10 10 10 10 10 10 14 10 10 10 10 12 19 1b
+```
+
+Compared with the multi-report replay in
+`traces/weather-hosts-replay-trace.jsonl`, serializer bytes `0..6` remain
+unchanged while bytes `7..15` vary. This confirms a stable header prefix and a
+single-record native output boundary, but it does not assign weather fields:
+the source response was not changed one named record at a time. Run
+`scripts/prove_encoder.py` with both traces to reproduce the bit comparison.
 
 # Reverse Engineering Report: Weather-Life Dongle
 
@@ -164,6 +185,19 @@ first capture, `0x5F` → `15 1f` for the second). The two captures differ only
 because each `usbdeviceread()` invocation generates a fresh, time/rand-seeded
 id.
 
+The complete `usbdeviceread()` control flow adds these details:
+
+- It performs an initial `CAL_USB_READ` on device index `1` before generating
+  or sending the registration frame.
+- The generated ID is one hexadecimal millisecond nibble followed by a
+  four-character, zero-padded hexadecimal `rand()` value. On MSVC, `rand()` is
+  already 15-bit, matching the equivalent `rand() & 0x7fff` expression in the
+  offline implementation.
+- It polls reads up to 20 times. A failed read advances the device index from
+  `1` through `4` before wrapping back to `1`; a successful but non-matching
+  response causes the same registration frame to be sent again in four
+  16-byte chunks with 100 ms delays.
+
 ### Device-button registration capture (2026-09-17)
 
 The long passive capture in `traces/device-registration-trace.jsonl` was started
@@ -227,6 +261,22 @@ transport), proves:
   report IOCTL), not `ReadFile`.
 - `FUN_100011d0` requires the opened device to match **VID `0x1130`, PID
   `0x0202`**, with the required HID usages described above.
+
+The `onlywell.dll` decompilation also establishes the exact low-level contract:
+
+- `CAL_USB_WRITE(device, buffer)` emits the eight-byte control header
+  `55 53 42 43 00 <length-low> <opcode> <device-index>`, where the opcode is
+  `0x02` and the device index is derived from the character `'0'`, `'1'`, or
+  `'2'`. It then emits the caller buffer unchanged.
+- `CAL_USB_READ(device, buffer)` emits the same header with opcode `0x01`,
+  calls `HidD_GetFeature` with `length + 1`, and copies the returned report
+  without its first byte.
+- `FUN_100019f0` prepends a zero report-ID byte before each `WriteFile` call;
+  this is why the observed control and payload reports are 9 and 17 bytes
+  while the logical buffers are 8 and 16 bytes.
+- `FUN_10001000` opens the matching Usage `0` and Usage `3` interfaces into
+  separate handles. The feature reads and payload writes use the Usage `0`
+  handle, while the eight-byte control writes use the Usage `3` handle.
 
 This was verified empirically, not just from decompiled code: `usbwr.exe` was
 killed and respawned fresh under Frida with a `CreateFileA`/`CreateFileW`
@@ -345,6 +395,28 @@ that split is an implementation detail, not part of the wire format.
 
 ### Daily Dispatch Indices Correlated (2026-09-17)
 
+### Arbitrary Bit-Cursor Behavior Confirmed (2026-09-27)
+
+With `usbwr.exe` active in GhidraMCP, `FUN_0040d340` was decompiled again.
+Its destination cursor is split across `DAT_0044e574` (destination byte
+offset) and `DAT_0044e470` (MSB-first bit-mask index). The weather branch at
+the case-5 branch at `0x4084f5` initializes these values to byte `10` and bit offset
+`4`, then appends fields without requiring byte alignment. The helper rolls
+the source bit index from `7` back to `0`, advances the source byte, and rolls
+the destination bit index from `7` back to `0`, advancing the destination
+byte and resetting its bit offset to `4`.
+
+The local `BitPacker` now exposes `bit_packer_init_at()` for this confirmed
+non-zero starting cursor. This adds the primitive needed to model the native
+header-plus-payload layout, but the field values and complete header remain
+unconfirmed and are intentionally not wired into `weather_frame_build()`.
+
+The same inspection reconfirmed that `usbwr.exe` resolves `CAL_USB_WRITE` at
+`0x40336a` from `onlywell.dll`; the weather branch sends a primary `0x80`-bit
+segment and can send a second `0x40`-bit segment in 16-byte chunks. The
+registration frame remains a separate path and must not be used as a weather
+payload.
+
 The lookup tables initialized at the start of `FUN_00401400` provide a direct
 day correlation for the weather record dispatcher. `f9cc[]` contains paired
 day-block selectors: dispatch records `0..5` select the current-condition
@@ -357,6 +429,72 @@ archived weather file, and both are initialized with 9-bit widths in the
 serializer's daily-width table. This confirms that the data for the next four
 days is part of the weather serialization path; it is not a clock-only update
 or an optional local display calculation.
+
+### Case-5 Value and Header Boundary Confirmed (2026-09-27)
+
+Additional GhidraMCP decompilation of `FUN_00412fb0`, `FUN_0040b9d0`, and
+`FUN_0040d340`, together with the `0x4084f5` case-5 disassembly, narrows the
+remaining uncertainty:
+
+- `FUN_00412fb0` reads the named weather file, extracts text between `<` and
+  `>`, parses decimal values, converts the encoded value to a float, and
+  computes one rounded temperature-like result. It processes five fields for
+  the current block and four fields for each daily block, returning up to seven
+  values in `param_1[0..6]`. This proves the provider boundary must supply the
+  legacy record semantics, not merely `temperature`, `humidity`, and a weather
+  code.
+- The numeric helper used by the serializer stores values below `0x100` in one
+  byte and larger values in two bytes, high byte first, before
+  `FUN_0040d340` appends the requested bit count. Negative values are retained
+  as signed integers until this conversion; the separate temperature rounding
+  path remains the source of the 9-bit temperature values.
+- Case 5 loads the local `SYSTEMTIME` fields and appends year fragments, month
+  (4 bits), day (5), hour (5), minute (6), second (6), and day-of-week (3).
+  It then parses and appends the `UPD` month/day/hour/minute values at
+  `0x408c05`, `0x408c8f`, `0x408d1a`, and `0x408da5` with widths 4/5/5/6.
+- Before those appends, case 5 copies the existing working buffer, sets the
+  destination cursor to byte `10` and mask `0x08`, and applies
+  `working[1] |= 0x07`. There are no literal writes that construct working
+  bytes `0..9` in this branch. Those ten header bytes are prepared by an
+  earlier dispatcher operation and are still not semantically decoded.
+- The same working buffer is passed to `CAL_USB_WRITE` with a primary length
+  of `0x80` bits. When the pending-send flag is set, the buffer is copied,
+  `working[0] |= 0x0f` and `working[1] |= 0x0f` are applied, and a second
+  `0x40`-bit segment is sent. This proves the segment control bytes but not
+  the meaning of every header bit.
+
+Therefore the BitPacker can now safely model the cursor, time fields, `UPD`,
+segment lengths, and the confirmed value conversion. It still must not invent
+bytes `0..9`, the current-condition field order, or the optional segment's
+semantic fields. `weather_frame_build()` remains experimental until the
+earlier header-producing dispatcher cases are traced.
+
+### Composite Case-5 Findings (2026-09-27)
+
+The active `usbwr.exe` program remains the correct Ghidra target; no switch to
+`weather.exe` or `onlywell.dll` is needed for this serializer. Raw disassembly
+of `FUN_00401400` shows the case-5 branch appending multiple fields before the
+`UPD` record and additional fields after it. The confirmed `UPD` calls occur
+at `0x00408c05`, `0x00408c8f`, `0x00408d1a`, and `0x00408da5`, with widths
+4/5/5/6, but they are not the beginning of the primary segment. Immediately
+before them, the branch appends fields with widths 7, conditional 6/8, 4, 5,
+5, 6, 6, and 3. This disproves the repository candidate's assumption that
+`UPD` starts at bit zero followed directly by the current-condition fields.
+
+The same dispatcher calls `FUN_0040bc70` through its thunk `0x00401069` after
+building packed segments. `FUN_0040bc70` computes a table-driven checksum over
+the packed nibble bytes and appends the result as two `0x10`-prefixed nibbles.
+This is a newly identified native payload checksum path, separate from the
+registration-frame CRC, but its exact covered range still needs a captured
+call-level comparison before it can be added to the replacement encoder.
+
+To promote the composite encoder, the remaining work is concrete: trace the
+dispatcher cases that populate working-buffer bytes `0..9`, map each append
+source to `TEMP`, `BTEMP`, `WEA`, `PRE`, `TREND`, `WS`, `BFT`, `WW`, `HUM`,
+`VIS`, `UVI`, `DEWP`, and the daily records, and prove the `0x40` segment's
+field list. Then replay one-field legacy fixtures and require byte-for-byte
+agreement with the original `CAL_USB_WRITE` payload before enabling hardware
+transmission.
 
 ### Final HID Wire Offset Proven (2026-09-17)
 
@@ -385,6 +523,60 @@ meaningful wire offset.
 This proves the transport offset, but not the semantic identity of every field
 at that position. The current weather field order remains experimental until
 each append call is mapped to its source record.
+
+### Full HID Request/Response Contract Proven (2026-09-27)
+
+The installed `onlywell.dll` disassembly closes the HID framing contract for
+both directions. `CAL_USB_WRITE` and `CAL_USB_READ` exchange separate control
+and data reports:
+
+```text
+write request:
+  HID report 0: 00 55 53 42 43 00 10 02 <device-index>
+  HID report 1: 00 <16 serializer bytes>
+
+read request:
+  HID report 0: 00 55 53 42 43 00 10 01 <device-index>
+  HID feature response: 17 bytes, report id 00 + 16 response bytes
+```
+
+The low-level transport writes the control report through `WriteFile`, then
+writes the 16-byte payload unchanged. It allocates a 17-byte temporary buffer,
+copies serializer byte `n` to HID report byte `n + 1`, and sends the report
+with a leading report-id byte `0x00`. The read path sends the opcode-`0x01`
+control report and invokes `HidD_GetFeature` with length `0x11` (17); success
+requires the HID call to succeed and the returned byte count to equal 17.
+
+The registration caller adds the semantic response condition: after masking
+each response byte with `0x0f`, it accepts only a response whose decoded bytes
+have `decoded[0] == 0`, `decoded[1] == 9`, and `decoded[2..11]` equal to the
+ten registration-id nibbles it generated. This is the complete proven
+request/response contract for the registration path. Existing captures show
+`HidD_GetFeature` returning `ok=true` and 17 bytes of `00 10 ... 10`, which
+proves transport success but fails the semantic registration acknowledgement.
+No weather-payload response semantics are present in this path; weather writes
+are one-way serializer reports.
+
+### `weather_frame_build` Proof Status (2026-09-27)
+
+The current C builder cannot be promoted as a native encoder. Its first output
+bit is written at frame byte `0`, bit mask `0x80`, and it appends `UPD` first.
+Native case 5 starts at serializer byte `10`, mask `0x08`, after a separately
+constructed ten-byte header; it appends local calendar fields, `UPD`, and
+additional fields in a dispatcher-controlled order. Native header construction
+also includes five selector cases, dynamic record processing, and a checksum
+helper. Therefore the current `weather_frame_build()` differs in cursor,
+header, field order, and checksum behavior before any input values are
+considered.
+
+The available traces cannot prove or disprove a corrected builder: they contain
+multiple changed records and do not identify the selector or source fixture
+for each write. The required proof is a fresh controlled replay with one
+legacy record changed per run, capturing the 16 serializer bytes immediately
+before `CAL_USB_WRITE`, followed by byte-for-byte comparison against a builder
+fed the same complete legacy record model. Until that comparison exists,
+`weather_frame_build()` remains experimental and live transmission must remain
+disabled.
 
 ### Case-5 Append Inventory (2026-09-17)
 
@@ -428,6 +620,126 @@ The four append sites therefore encode `03` with 4 bits, `08` with 5 bits,
 after these appends and belongs to the subsequent serializer work, so it does
 not change the `UPD` mapping.
 
+### Non-Clock Dispatch and Dynamic Record Tables (2026-09-27)
+
+Raw disassembly resolves the dispatch before the case-5 clock branch:
+
+- At `0x00406e41`, the operation selector is copied from local `fb7c` into
+  local `f53c`.
+- `0x00406e4d` rejects selectors greater than `0x13`.
+- `0x00406e60` jumps through the 20-entry table at `0x00409374`.
+- Selectors `0..9` target `00406e67`, `00406efb`, `00406f52`, `00406fa9`,
+  `00407000`, `00407057`, `0040709c`, `00407890`, `00407df1`, and
+  `004081b2`.
+
+Selectors `0..4` are header-producing operations. Each packs ten successive
+8-bit values with `FUN_0040d340`; their source scratch arrays begin at locals
+`fca4`, `fca3`, `fca2`, `fca1`, and `fc9f`. This explains why case 5 reuses
+an existing ten-byte header instead of constructing bytes `0..9` itself.
+Selector 5 enters at `0x00407057`, obtains local time, and rejoins the
+shared path at `0x0040849c`; the later `0x004084d9` test selects the clock and
+`UPD` append work. It is not the operation that names the weather records.
+
+Selectors `6..9` are the non-clock record-processing families. They dispatch
+again through nested tables at `0x004093c4`, `0x004093f4`, and `0x0040940c`,
+then repeatedly call the BitPacker thunk with widths from local width tables.
+The inputs are converted record text, not direct `WeatherData` fields. Their
+output joins the same working buffer before the common `0x80`-bit write at
+`0x0040902d`.
+
+The serializer initializes these tables at the beginning of
+`FUN_00401400`:
+
+```text
+local f4f4..f4c8: 9, 9, 7, 11, 2, 8, 0, 5, 7, 8, 5, 9
+local f528..f4f8: 9, 9, 7, 8, 0, 5, 7, 7, 8, 0, 5, 7
+local f55c..f534: 8, 0, 5, 7, 11, 11, 7, 8, 5, 5, 8
+```
+
+The first two rows are 12-entry width families; the third is the daily
+family used by the nested forecast branches. They overlap the widths in the
+archived current and daily records, but the executable does not embed all
+record names, so these rows must not yet be relabeled as `TEMP`, `HUM`, `WEA`,
+or individual forecast fields.
+
+A separate 27-entry selector table at locals `f634..f5c8` is initialized as
+six zero entries followed by pairs `1,1`, `2,2`, through `10,10`, with a
+final zero sentinel. The non-clock branches use it to choose the current
+record group or daily block while iterating parsed records. This proves the
+native data path groups daily records, but not which four named records belong
+to each group.
+
+The named-record lookup is dynamic. `FUN_00412fb0` supplies key storage with
+a seven-byte stride and calls `FUN_004128a0` to find each key. It reads five
+keys for the current block and four keys per daily block, up to seven days.
+`FUN_0040b5e0` advances the shared record iterator and copies the next line
+into scratch storage; `FUN_0040b730` tests the record object's `+0x30` slot
+for `-1`; `FUN_0040b770` forwards through the record object's virtual table;
+and `FUN_0040b7c0` returns the record-data pointer at `+4`. Only `TEMPH` is
+present as a useful embedded key string. The remaining keys are loaded or
+constructed at runtime, so static string search cannot complete the mapping.
+
+This proves the non-clock dispatch and dynamic grouping mechanism. It does
+not yet prove the semantic name of every table slot, the absolute bit offset
+of each weather field, or the field list in the optional `0x40`-bit segment.
+Those require a controlled one-record-at-a-time fixture and a call-boundary
+capture of the resulting `CAL_USB_WRITE` buffers.
+
+### Header Source and Record Mapping Proof (2026-09-27)
+
+The dispatcher source blocks are now resolved further. Before selector dispatch,
+the native code reads a line into a scratch buffer, takes the text after its
+first semicolon with `FUN_004105e0`, and writes that value into a zero-filled
+40-byte local table at `ebp-0x364` through `ebp-0x33d`. The table is therefore
+not a guessed constant header; it is derived from the parsed `weather.dat`
+record line.
+
+The five header-producing selectors use the following byte sources, all packed
+with ten calls to `FUN_0040d340` at width 8:
+
+```text
+selector 0: converted value at ebp-0x7a4, then table[0..8]
+selector 1: table[7..16]
+selector 2: table[15..24]
+selector 3: table[23..32]
+selector 4: table[31..39]
+```
+
+The first four ranges are directly visible in the address calculations at
+`0x00406edd`, `0x00406f34`, `0x00406f8b`, `0x00406fe2`, and `0x00407039`.
+The apparent overlap between selector 0 and selector 1 is intentional: case 0
+uses a separately converted value for its first byte, while its remaining nine
+bytes and the other cases consume the rolling 40-byte table. This proves the
+header construction mechanism and byte order, but not the semantic label of
+each table byte.
+
+The parser's semantic record names are now proven from the executable's
+embedded constants and seven-byte key layout. The five current keys are:
+
+```text
+TEMP, WS, HUM, TEMPH, TEMPL
+```
+
+The four keys repeated for each daily block are:
+
+```text
+TEMPH, TEMPL, WS, HUM
+```
+
+`FUN_00412fb0` searches those keys with `FUN_004128a0`, converts their values,
+and combines five current values followed by four values for each daily block,
+up to seven blocks. The constants are visible at `0x004478c0`
+(`TEMPL`), `0x004478c8` (`TEMPH`), `0x004478d0` (`HUM`),
+`0x004478d4` (`TEMP`), and `0x00447330` (`WS`). This proves the parser record
+mapping, independent of archive record order.
+
+What remains unproven is narrower than before: which semantic meaning the
+40 header bytes have, how those bytes relate to the 20-bit/other packed fields,
+and the exact field-to-bit mapping at the `CAL_USB_WRITE` boundary. Those
+require changing one of the source records in `weather.dat` at a time and
+capturing the resulting native buffer; existing traces change multiple inputs
+and cannot distinguish those owners.
+
 ### Archive Fixture Cross-Check (2026-09-17)
 
 The archived import fixture `C:\Users\rmonn\Desktop\www.weather-life.com\update\city\06344.csv`
@@ -461,7 +773,8 @@ stores negative values as 9-bit two's-complement values (`0x200 - magnitude`).
 The two daily temperature fields are each appended as 9 bits. `src/weather_frame.h`
 exposes the verified dispatch constants, while `src/weather_frame.c` remains an
 experimental candidate encoder until absolute offsets and segmentation are
-traced.
+traced. Live transmission is disabled while those mappings remain unresolved;
+only the proven cursor and `UPD` shell is available for offline inspection.
 
 **Still open**: the exact byte offsets of every remaining field within the
 16-byte "today" and 8-byte second segment (high-confidence but not yet
@@ -489,6 +802,36 @@ individual weather fields, so differential fixtures are still required.
 
 The following packet layouts remain historical hypotheses and must not be treated as the live wire format until more traces correlate bytes with a known UI action.
 
+### onlywell.dll Control Flow Confirmed (2026-09-27)
+
+`DeviceIni()` at `0x10001e70` does not transmit an initialization command. It
+calls `FUN_10001000(0)`, which enumerates HID interfaces and opens the matching
+Usage Page 1 interfaces with Usage 0 and Usage 3. The Usage 3 handle sends
+command headers; the Usage 0 handle performs feature-report reads and payload
+writes.
+
+`CAL_USB_STATUS()` at `0x10001ea0` calls `FUN_10001970`. That helper sends a
+zero-length `CAL_USB_READ` header through Usage 3, then calls
+`HidD_GetFeature` through Usage 0 with a 17-byte report buffer. The exported
+status function returns the first byte of that feature report, or `0xff` when
+the exchange fails.
+
+`CAL_USB_READ(selector, buffer, length)` at `0x10001f60` sends the same header
+with a one-byte length and selector byte (`0`, `1`, or `2`), then reads the
+feature report. The header is wrapped in a zero-report-ID HID output report:
+
+```
+[0]      Report ID: 0
+[1..4]   55 53 42 43 ("USBC")
+[5]      Reserved byte: 0
+[6]      Length, low byte
+[7]      Command: 1 (CAL_USB_READ)
+[8]      Selector: 0, 1, or 2
+```
+
+The old `0x04 0x00` initialization request and `0x03 0x00` status request
+remain unsupported hypotheses and must not be sent.
+
 ### Command Structure
 
 ```
@@ -504,20 +847,11 @@ RESPONSE PACKET:
 
 ### Command Definitions
 
-#### 1. Device Initialization (CAL_USB_WRITE / DeviceIni)
-**Purpose**: Initialize device on startup
-```
-Request:  0x04 0x00
-Response: 0x00 <optional device info>
-```
+#### 1. Device Initialization (DeviceIni)
+**Purpose**: Enumerate and open the two required HID interfaces. No wire command is sent.
 
 #### 2. Status Query (CAL_USB_STATUS)
-**Purpose**: Get device status/health check
-```
-Request:  0x03 0x00
-Response: 0x00 <status byte>
-          Status bits: [reserved x6][error][ready]
-```
+**Purpose**: Send a zero-length `CAL_USB_READ` header and return byte 0 of the 17-byte feature report.
 
 #### 3. Send Weather Data (CAL_USB_WRITE)
 **Purpose**: Display weather on LCD
@@ -710,17 +1044,17 @@ UsbWeatherStation = "C:\Program Files (x86)\Weather\usbwr.exe"
 - **Status**: Ready for implementation
 
 ### Linux Implementation
-- **API**: libusb-1.0
-- **Device Discovery**: libusb_get_device_list()
-- **Communication**: libusb_bulk_transfer()
+- **API**: hidapi
+- **Device Discovery**: hid_enumerate(), filtered by Usage Page 1 and Usage 0/3
+- **Communication**: hid_write() for Usage 3 command reports and Usage 0 payload reports; hid_get_feature_report() for reads
 - **Permissions**: /etc/udev/rules.d for device access
-- **Status**: Ready for implementation
+- **Status**: Implemented using the shared hidapi transport
 
 ### macOS Implementation
-- **API**: IOKit framework
-- **Device Discovery**: IOServiceMatching()
-- **Communication**: IOKit USB interfaces
-- **Status**: Ready for implementation
+- **API**: hidapi
+- **Device Discovery**: hid_enumerate(), filtered by Usage Page 1 and Usage 0/3
+- **Communication**: hid_write() for Usage 3 command reports and Usage 0 payload reports; hid_get_feature_report() for reads
+- **Status**: Implemented using the shared hidapi transport
 
 ## Implementation Roadmap
 

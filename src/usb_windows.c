@@ -13,6 +13,9 @@
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "hid.lib")
 
+#define TENX_COMMAND_HEADER_SIZE 8
+#define TENX_READ_LENGTH 0x10
+
 // The original onlywell.dll accepts this Tenx composite HID device.
 static WeatherDeviceID known_devices[] = {
     {0x1130, 0x0202, "Tenx HID", "Composite HID weather display"},
@@ -22,8 +25,10 @@ static WeatherDeviceID known_devices[] = {
 
 typedef struct {
     HANDLE device_file;
+    HANDLE command_file;
     PHIDP_PREPARSED_DATA preparsed_data;
     HIDP_CAPS caps;
+    HIDP_CAPS command_caps;
 } DeviceContext;
 
 static bool is_known_device(const HIDD_ATTRIBUTES* attributes)
@@ -57,9 +62,9 @@ static bool open_device_windows(const char* device_path, USBDevice* device)
     HDEVINFO device_info;
     SP_DEVICE_INTERFACE_DATA interface_data;
     DeviceContext* usage0_context = NULL;
+    DeviceContext* usage3_context = NULL;
     HIDD_ATTRIBUTES usage0_attributes;
     char usage0_path[sizeof(device->device_path)] = {0};
-    bool usage3_found = false;
 
     (void)device_path;
 
@@ -139,13 +144,19 @@ static bool open_device_windows(const char* device_path, USBDevice* device)
             strncpy_s(usage0_path, sizeof(usage0_path), detail->DevicePath,
                       _TRUNCATE);
         } else {
-            usage3_found = true;
-            HidD_FreePreparsedData(preparsed_data);
-            CloseHandle(file);
-            free(context);
+            if (usage3_context) {
+                HidD_FreePreparsedData(usage3_context->preparsed_data);
+                CloseHandle(usage3_context->device_file);
+                free(usage3_context);
+            }
+            usage3_context = context;
         }
         free(detail);
-        if (usage0_context && usage3_found) {
+        if (usage0_context && usage3_context) {
+            usage0_context->command_file = usage3_context->device_file;
+            usage0_context->command_caps = usage3_context->caps;
+            HidD_FreePreparsedData(usage3_context->preparsed_data);
+            free(usage3_context);
             device->handle = usage0_context;
             device->vid = usage0_attributes.VendorID;
             device->pid = usage0_attributes.ProductID;
@@ -162,6 +173,11 @@ static bool open_device_windows(const char* device_path, USBDevice* device)
         CloseHandle(usage0_context->device_file);
         free(usage0_context);
     }
+    if (usage3_context) {
+        HidD_FreePreparsedData(usage3_context->preparsed_data);
+        CloseHandle(usage3_context->device_file);
+        free(usage3_context);
+    }
     SetupDiDestroyDeviceInfoList(device_info);
     return false;
 }
@@ -175,6 +191,7 @@ static bool close_device_windows(USBDevice* device)
     context = (DeviceContext*)device->handle;
     if (context->preparsed_data) HidD_FreePreparsedData(context->preparsed_data);
     if (context->device_file != INVALID_HANDLE_VALUE) CloseHandle(context->device_file);
+    if (context->command_file != INVALID_HANDLE_VALUE) CloseHandle(context->command_file);
     free(context);
     device->handle = NULL;
     return true;
@@ -184,13 +201,34 @@ static bool close_device_windows(USBDevice* device)
 static bool read_data_windows(USBDevice* device, uint8_t* buffer, int buffer_size, int* bytes_read)
 {
     DeviceContext* context;
+    BYTE* command_report;
     BYTE* report;
     ULONG report_size;
+    ULONG command_report_size;
+    DWORD bytes_written;
     if (!device || !device->handle || !buffer || !bytes_read || buffer_size < 0) return false;
 
     context = (DeviceContext*)device->handle;
     report_size = context->caps.FeatureReportByteLength;
+    command_report_size = context->command_caps.OutputReportByteLength;
     if (report_size <= 1 || buffer_size < (int)(report_size - 1)) return false;
+    if (command_report_size < TENX_COMMAND_HEADER_SIZE + 1) return false;
+    command_report = (BYTE*)calloc(command_report_size, sizeof(BYTE));
+    if (!command_report) return false;
+    command_report[1] = 0x55;
+    command_report[2] = 0x53;
+    command_report[3] = 0x42;
+    command_report[4] = 0x43;
+    command_report[5] = TENX_READ_LENGTH;
+    command_report[6] = CAL_USB_READ;
+    command_report[7] = 0;
+    bytes_written = 0;
+    if (!WriteFile(context->command_file, command_report, command_report_size,
+                   &bytes_written, NULL) || bytes_written != command_report_size) {
+        free(command_report);
+        return false;
+    }
+    free(command_report);
     report = (BYTE*)calloc(report_size, sizeof(BYTE));
     if (!report) return false;
     if (!HidD_GetFeature(context->device_file, report, report_size)) {
@@ -207,20 +245,48 @@ static bool read_data_windows(USBDevice* device, uint8_t* buffer, int buffer_siz
 static bool write_data_windows(USBDevice* device, const uint8_t* buffer, int buffer_size)
 {
     DeviceContext* context;
-    BYTE* report;
     ULONG report_size;
-    bool result;
+    ULONG command_report_size;
+    BYTE* report;
+    DWORD bytes_written;
+    uint8_t command[8];
     if (!device || !device->handle || !buffer || buffer_size < 0) return false;
 
     context = (DeviceContext*)device->handle;
-    report_size = context->caps.FeatureReportByteLength;
+    report_size = context->caps.OutputReportByteLength;
+    command_report_size = context->command_caps.OutputReportByteLength;
     if (report_size <= 1 || buffer_size > (int)(report_size - 1)) return false;
+    if (command_report_size < TENX_COMMAND_HEADER_SIZE + 1) return false;
+    report = (BYTE*)calloc(command_report_size, sizeof(BYTE));
+    if (!report) return false;
+    command[0] = 0x55;
+    command[1] = 0x53;
+    command[2] = 0x42;
+    command[3] = 0x43;
+    command[4] = 0;
+    command[5] = (uint8_t)buffer_size;
+    command[6] = CAL_USB_WRITE;
+    command[7] = 0;
+    memcpy(report + 1, command, TENX_COMMAND_HEADER_SIZE);
+    bytes_written = 0;
+    if (!WriteFile(context->command_file, report, command_report_size,
+                   &bytes_written, NULL) || bytes_written != command_report_size) {
+        free(report);
+        return false;
+    }
+    free(report);
     report = (BYTE*)calloc(report_size, sizeof(BYTE));
     if (!report) return false;
+    memset(report, 0, report_size);
     memcpy(report + 1, buffer, buffer_size);
-    result = HidD_SetFeature(context->device_file, report, report_size) != FALSE;
+    bytes_written = 0;
+    if (!WriteFile(context->device_file, report, report_size, &bytes_written, NULL) ||
+        bytes_written != report_size) {
+        free(report);
+        return false;
+    }
     free(report);
-    return result;
+    return true;
 }
 
 // Send USB command
@@ -252,11 +318,6 @@ static bool get_status_windows(USBDevice* device, uint8_t* status)
     uint8_t buffer[64];
     int bytes_read = 0;
     
-    if (!send_command_windows(device, CAL_USB_STATUS, NULL, 0)) {
-        return false;
-    }
-    
-    // Read response
     if (!read_data_windows(device, buffer, sizeof(buffer), &bytes_read)) {
         return false;
     }

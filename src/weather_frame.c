@@ -45,6 +45,30 @@ bool weather_frame_append_upd(BitPacker* packer, const WeatherFrameTime* time)
     return true;
 }
 
+bool weather_frame_begin_native_primary(BitPacker* packer,
+                                        uint8_t frame[WEATHER_FRAME_SIZE])
+{
+    if (!packer || !frame) return false;
+
+    frame[1] |= 0x07;
+    bit_packer_init_at(packer, frame, WEATHER_FRAME_SIZE,
+                       WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET,
+                       WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET);
+    return true;
+}
+
+bool weather_frame_build_proven_upd(const WeatherFrameTime* time,
+                                    uint8_t frame[WEATHER_FRAME_SIZE])
+{
+    BitPacker packer;
+
+    if (!time || !frame) return false;
+
+    memset(frame, 0, WEATHER_FRAME_SIZE);
+    if (!weather_frame_begin_native_primary(&packer, frame)) return false;
+    return weather_frame_append_upd(&packer, time);
+}
+
 bool weather_frame_build(const WeatherFrameInput* input, uint8_t frame[WEATHER_FRAME_SIZE])
 {
     if (!input || !frame) return false;

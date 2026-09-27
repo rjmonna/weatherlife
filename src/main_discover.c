@@ -26,15 +26,9 @@ int main(int argc, char* argv[])
                               strcmp(argv[1], "--print-weather-frame") == 0;
 
     if (print_weather_frame) {
-        WeatherFrameInput sample = {
-            .time = {.month = 9, .day = 17, .hour = 14, .minute = 30},
-            .current_temperature_c = 17.5f,
-            .uv_index = 3,
-            .high_temperature_c = {20.0f, 18.0f, 19.0f, 21.0f, 17.0f},
-            .low_temperature_c = {12.0f, 11.0f, 10.0f, 13.0f, 9.0f}
-        };
+        WeatherFrameTime sample_time = {9, 17, 14, 30};
         uint8_t frame[WEATHER_FRAME_SIZE];
-        if (!weather_frame_build(&sample, frame)) {
+        if (!weather_frame_build_proven_upd(&sample_time, frame)) {
             printf("[-] Could not build weather frame\n");
             return 1;
         }

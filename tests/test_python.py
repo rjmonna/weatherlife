@@ -22,7 +22,12 @@ from weather_provider import (  # noqa: E402
     weather_code_description,
 )
 from analyze_trace import load_events as load_trace_events  # noqa: E402
-from prove_encoder import differing_bits, load_events as load_proof_events  # noqa: E402
+from mutate_legacy_fixture import mutate_record  # noqa: E402
+from prove_encoder import (  # noqa: E402
+    differing_bits,
+    load_events as load_proof_events,
+    varying_bytes,
+)
 
 
 class DongleProtocolTests(unittest.TestCase):
@@ -161,6 +166,31 @@ class TraceUtilityTests(unittest.TestCase):
 
     def test_differing_bits_reports_msb_offsets(self):
         self.assertEqual(differing_bits(b"\x80\x01", b"\x00\x03"), [0, 14])
+
+    def test_varying_bytes_reports_byte_offsets(self):
+        self.assertEqual(varying_bytes([b"\x00\x01", b"\x00\x03"]), [1])
+
+    def test_mutate_record_preserves_suffix_and_selects_occurrence(self):
+        source = (
+            "CITY_AND_WMO  <X;Y;1>;\n"
+            "TEMP          <9>         <1.0>c;\n"
+            "DAY1 20260927;\n"
+            "TEMPH         <9>         <2>c;\n"
+            "TEMPH         <9>         <3>c;\n"
+        )
+        mutated = mutate_record(source, "TEMPH", "8", "DAY1", 2)
+        self.assertIn("TEMPH         <9>         <2>c;", mutated)
+        self.assertIn("TEMPH         <9>         <8>c;", mutated)
+        self.assertEqual(mutated.count("<8>c;"), 1)
+
+    def test_mutate_record_rejects_identity_and_missing_records(self):
+        source = "CITY_AND_WMO <X;Y;1>;\nTEMP <9> <1.0>c;\n"
+        with self.assertRaises(ValueError):
+            mutate_record(source, "CITY_AND_WMO", "changed")
+        with self.assertRaises(ValueError):
+            mutate_record(source, "HUM", "50")
+        with self.assertRaises(ValueError):
+            mutate_record(source, "TEMP", "2.0", occurrence=0)
 
 
 if __name__ == "__main__":

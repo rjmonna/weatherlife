@@ -18,16 +18,14 @@ if host_os == 'windows'
   platform_libs = [win_deps, hid_dep]
 elif host_os == 'linux'
   platform = 'linux'
-  usb_dep = dependency('libusb-1.0', required: true)
-  platform_files = ['src/usb_linux.c']
-  platform_libs = [usb_dep]
+  hidapi_dep = cc.find_library('hidapi', required: true)
+  platform_files = ['src/hid_transport.c', 'src/usb_linux.c']
+  platform_libs = [hidapi_dep]
 elif host_os == 'darwin'
   platform = 'macos'
-  usb_dep = dependency('libusb-1.0', required: true)
-  iokit_dep = cc.find_library('IOKit')
-  corefoundation_dep = cc.find_library('CoreFoundation')
-  platform_files = ['src/usb_macos.c']
-  platform_libs = [usb_dep, iokit_dep, corefoundation_dep]
+  hidapi_dep = cc.find_library('hidapi', required: true)
+  platform_files = ['src/hid_transport.c', 'src/usb_macos.c']
+  platform_libs = [hidapi_dep]
 else
   error('Unsupported platform: ' + host_os)
 endif

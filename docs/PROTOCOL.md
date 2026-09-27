@@ -21,8 +21,8 @@ registration frames.
 - **Product ID**: 0x0202
 - **HID Usage Page**: 1
 - **Required Usages**: 0 and 3
-- **Observed I/O**: HID feature reports through `HidD_GetFeature` and
-   `HidD_SetFeature`
+- **Observed I/O**: HID feature reports through `HidD_GetFeature` for reads;
+   output reports through `WriteFile` for control and payload writes
 - **Endpoint layout**: Not treated as a protocol contract; the Windows HID
    API abstracts the underlying reports.
 
@@ -35,7 +35,8 @@ The passive traces contain these facts only:
 
 - `00 55 53 42 43 00 10 01 00` is a repeated 9-byte control report on the
    `CAL_USB_READ` path.
-- A related `... 02 00` report is observed, but its meaning is unassigned.
+- `00 55 53 42 43 00 10 02 00` is the confirmed 9-byte write-control report;
+   the following 17-byte report carries the 16-byte serializer buffer.
 - The repeated 17-byte report is the `usbwr.dll` registration handshake, not
    weather data. Its nibble packing and CRC-8 are documented in
    `docs/REVERSE_ENGINEERING.md` and implemented offline in
@@ -80,6 +81,28 @@ Static analysis located a native serializer in `usbwr.exe`:
    but does not identify individual weather-field offsets.
 - Field order, absolute offsets, response semantics, condition-code values,
    display formatting, and device acknowledgments remain unconfirmed.
+
+### Dispatch and runtime record lookup
+
+The native serializer is a dispatcher rather than one straight field list.
+`FUN_00401400` bounds an operation selector to `0..19` and jumps through
+`0x00409374`. Cases `0..4` build ten-byte header variants by packing ten
+8-bit values. Case 5 appends local time and `UPD`; cases `6..9` process
+record groups through nested jump tables and feed converted text to the same
+MSB-first BitPacker.
+
+The record names are resolved dynamically. The native parser searches keys
+with a seven-byte stride, reads five current sub-fields and four sub-fields
+for each daily block, and can produce seven daily temperature-like values.
+A 27-entry local selector table groups the current records and paired daily
+records. Only `TEMPH` is embedded as a useful key string; the other names are
+loaded or assembled at runtime. The initialized width tables are therefore
+strong evidence for wire widths, but are not sufficient to assign every slot
+to `TEMP`, `HUM`, `WEA`, or a forecast field.
+
+The exact semantic mapping still requires controlled legacy fixtures that
+change one named record at a time and capture the corresponding native
+`CAL_USB_WRITE` buffer.
 
 Do not use a byte-oriented command-plus-length payload as an implementation
 contract. The original weather path is a bit-packed

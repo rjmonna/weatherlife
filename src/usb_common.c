@@ -79,20 +79,8 @@ bool usb_init_device(USBDevice* device)
     
     printf("Initializing device at %s\n", device->device_path);
     
-    // Send initialization command for legacy HID devices.
-    if (!backend->send_command(device, CMD_DEVICE_INIT, NULL, 0)) {
-        fprintf(stderr, "Failed to send init command\n");
-        return false;
-    }
-    
-    // Small delay for device response
-    #ifdef _WIN32
-        Sleep(100);
-    #else
-        usleep(100000);
-    #endif
-    
-    // Get device status
+    // DeviceIni is an enumeration/open operation; status performs the
+    // confirmed read-header plus feature-report exchange.
     uint8_t status = 0;
     if (!backend->get_status(device, &status)) {
         fprintf(stderr, "Failed to get device status\n");
@@ -106,38 +94,11 @@ bool usb_init_device(USBDevice* device)
 // Send weather data to display
 bool usb_send_weather_data(USBDevice* device, const WeatherData* data)
 {
-    USBBackend* backend;
-    WeatherFrameInput input;
-    uint8_t frame[WEATHER_FRAME_SIZE];
-    time_t now;
-    struct tm current_time;
-
-    if (!device || !device->handle || !data) return false;
-
-    backend = usb_get_backend();
-    if (!backend || !backend->write_data) return false;
-
-    memset(&input, 0, sizeof(input));
-    now = time(NULL);
-#ifdef _WIN32
-    if (localtime_s(&current_time, &now) != 0) return false;
-#else
-    if (!localtime_r(&now, &current_time)) return false;
-#endif
-    input.time.month = current_time.tm_mon + 1;
-    input.time.day = current_time.tm_mday;
-    input.time.hour = current_time.tm_hour;
-    input.time.minute = current_time.tm_min;
-    input.current_temperature_c = data->temperature;
-    input.pressure_hpa = data->pressure > 0 ? (uint16_t)data->pressure : 0;
-    input.wind_speed = data->wind_speed < 0 ? 0 : (uint16_t)data->wind_speed;
-    input.humidity_percent = data->humidity < 0 ? 0 : (uint16_t)data->humidity;
-
-    if (!weather_frame_build(&input, frame)) return false;
-
-    // This writes the experimental 16-byte segment directly. Rainfall is not
-    // included until its native bit width and offset are proven.
-    return backend->write_data(device, frame, WEATHER_FRAME_SIZE);
+    (void)device;
+    (void)data;
+    fprintf(stderr,
+            "Weather transmission refused: native header field semantics and wire offsets remain unproven\n");
+    return false;
 }
 
 bool usb_replay_captured_registration_frame(USBDevice* device)

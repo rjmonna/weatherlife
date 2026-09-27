@@ -53,6 +53,17 @@ def differing_bits(left: bytes, right: bytes) -> List[int]:
     return differences
 
 
+def varying_bytes(reports: Iterable[bytes]) -> List[int]:
+    """Return byte offsets whose values vary across native reports."""
+    report_list = list(reports)
+    if not report_list:
+        return []
+    return [
+        index for index in range(len(report_list[0]))
+        if len({report[index] for report in report_list}) > 1
+    ]
+
+
 def prove(paths: Iterable[Path]) -> int:
     """Print observed payloads and differential bit evidence."""
     all_reports = []
@@ -70,6 +81,10 @@ def prove(paths: Iterable[Path]) -> int:
     if len(distinct) < 2:
         print("Proof status: insufficient distinct accepted weather reports")
         return 2
+
+    print("Varying byte offsets: " + ", ".join(str(index) for index in varying_bytes(
+        report for _, report in all_reports
+    )))
 
     left, right = distinct[:2]
     bits = differing_bits(left, right)

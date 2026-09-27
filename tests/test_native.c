@@ -38,6 +38,19 @@ static int test_bit_packer(void)
     ASSERT_INT(0xaa, buffer[1]);
     ASSERT_INT(0x80, buffer[2]);
 
+    memset(buffer, 0, sizeof(buffer));
+    bit_packer_init_at(&packer, buffer, sizeof(buffer), 1, 4);
+    bit_packer_append(&packer, 0x5, 3);
+    ASSERT_INT(15, (int)packer.bit_position);
+    ASSERT_INT(0x0a, buffer[1]);
+
+    memset(buffer, 0, sizeof(buffer));
+    bit_packer_init_at(&packer, buffer, sizeof(buffer), 1, 4);
+    bit_packer_append(&packer, 0x1f, 5);
+    ASSERT_INT(17, (int)packer.bit_position);
+    ASSERT_INT(0x0f, buffer[1]);
+    ASSERT_INT(0x08, buffer[2]);
+
     bit_packer_init(&packer, buffer, 1);
     buffer[0] = 0;
     bit_packer_append(&packer, 0xffff, 16);
@@ -124,6 +137,13 @@ static int test_weather_frame(void)
     ASSERT_INT(0xcf, frame[0]);
     ASSERT_INT(0xdf, frame[1]);
     ASSERT_INT(0xfc, frame[2]);
+
+    memset(frame, 0, sizeof(frame));
+    ASSERT_TRUE(weather_frame_begin_native_primary(&packer, frame));
+    ASSERT_INT(84, (int)packer.bit_position);
+    ASSERT_INT(0x07, frame[1]);
+    ASSERT_TRUE(weather_frame_append_upd(&packer, &time));
+    ASSERT_INT(104, (int)packer.bit_position);
 
     time.month = 0;
     ASSERT_TRUE(!weather_frame_append_upd(&packer, &time));

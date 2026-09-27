@@ -6,6 +6,7 @@
 
 
 build/
+build-tests/
 .cmake-validation/
 traces/
 

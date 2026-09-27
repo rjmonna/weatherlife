@@ -27,17 +27,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(LIBS setupapi hid)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PLATFORM "LINUX")
-    set(SOURCES ${COMMON_SOURCES} src/usb_linux.c)
-    find_package(libusb-1.0 REQUIRED)
-    set(LIBS ${LIBUSB_LIBRARIES})
-    include_directories(${LIBUSB_INCLUDE_DIRS})
+    set(SOURCES ${COMMON_SOURCES} src/hid_transport.c src/usb_linux.c)
+    find_path(HIDAPI_INCLUDE_DIR hidapi/hidapi.h REQUIRED)
+    find_library(HIDAPI_LIBRARY hidapi REQUIRED)
+    set(LIBS ${HIDAPI_LIBRARY})
+    include_directories(${HIDAPI_INCLUDE_DIR})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(PLATFORM "MACOS")
-    set(SOURCES ${COMMON_SOURCES} src/usb_macos.c)
-    set(LIBS
-        "-framework IOKit"
-        "-framework CoreFoundation"
-    )
+    set(SOURCES ${COMMON_SOURCES} src/hid_transport.c src/usb_macos.c)
+    find_path(HIDAPI_INCLUDE_DIR hidapi/hidapi.h REQUIRED)
+    find_library(HIDAPI_LIBRARY hidapi REQUIRED)
+    set(LIBS ${HIDAPI_LIBRARY})
 endif()
 
 # Main library
