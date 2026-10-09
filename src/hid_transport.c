@@ -9,12 +9,38 @@
 #define TENX_PAYLOAD_USAGE 0
 #define TENX_COMMAND_REPORT_SIZE 9
 #define TENX_PAYLOAD_REPORT_SIZE 17
-#define TENX_FEATURE_REPORT_SIZE 65
+#define TENX_READ_LENGTH 0x10
+#define TENX_FEATURE_REPORT_SIZE 17
 
 struct HidTransport {
     hid_device* payload_device;
     hid_device* command_device;
 };
+
+bool hid_transport_device_present(uint16_t vendor_id, uint16_t product_id,
+                                  bool* out_present)
+{
+    struct hid_device_info* devices;
+    struct hid_device_info* current;
+    bool has_payload = false;
+    bool has_command = false;
+
+    if (!out_present) return false;
+    *out_present = false;
+    if (hid_init() != 0) return false;
+
+    devices = hid_enumerate(vendor_id, product_id);
+    for (current = devices; current; current = current->next) {
+        if (current->usage_page != TENX_USAGE_PAGE) continue;
+        if (current->usage == TENX_PAYLOAD_USAGE) has_payload = true;
+        if (current->usage == TENX_COMMAND_USAGE) has_command = true;
+    }
+    hid_free_enumeration(devices);
+    hid_exit();
+
+    *out_present = has_payload && has_command;
+    return true;
+}
 
 bool hid_transport_open(uint16_t vendor_id, uint16_t product_id,
                         HidTransport** out_transport, char* path,
@@ -28,6 +54,7 @@ bool hid_transport_open(uint16_t vendor_id, uint16_t product_id,
 
     if (!out_transport) return false;
     *out_transport = NULL;
+    if (path && path_size > 0) path[0] = '\0';
     if (hid_init() != 0) return false;
 
     devices = hid_enumerate(vendor_id, product_id);
@@ -50,14 +77,15 @@ bool hid_transport_open(uint16_t vendor_id, uint16_t product_id,
     }
     transport->payload_device = hid_open_path(payload_path);
     transport->command_device = hid_open_path(command_path);
+    if (transport->payload_device && transport->command_device && path &&
+        path_size != 0) {
+        strncpy(path, payload_path, path_size - 1);
+        path[path_size - 1] = '\0';
+    }
     hid_free_enumeration(devices);
     if (!transport->payload_device || !transport->command_device) {
         hid_transport_close(transport);
         return false;
-    }
-    if (path && path_size != 0) {
-        strncpy(path, payload_path, path_size - 1);
-        path[path_size - 1] = '\0';
     }
     *out_transport = transport;
     return true;
@@ -72,6 +100,30 @@ void hid_transport_close(HidTransport* transport)
     hid_exit();
 }
 
+bool hid_transport_get_status(HidTransport* transport, uint8_t* status)
+{
+    unsigned char command_report[TENX_COMMAND_REPORT_SIZE] = {0};
+    unsigned char report[TENX_FEATURE_REPORT_SIZE] = {0};
+    int result;
+
+    if (!transport || !transport->payload_device || !transport->command_device ||
+        !status) return false;
+    command_report[1] = 0x55;
+    command_report[2] = 0x53;
+    command_report[3] = 0x42;
+    command_report[4] = 0x43;
+    command_report[7] = CAL_USB_READ;
+    if (hid_write(transport->command_device, command_report,
+                  sizeof(command_report)) != (int)sizeof(command_report)) {
+        return false;
+    }
+    result = hid_get_feature_report(transport->payload_device, report,
+                                    sizeof(report));
+    if (result < 1) return false;
+    *status = report[0];
+    return true;
+}
+
 bool hid_transport_read_feature(HidTransport* transport, uint8_t* buffer,
                                 int buffer_size, int* bytes_read)
 {
@@ -79,13 +131,18 @@ bool hid_transport_read_feature(HidTransport* transport, uint8_t* buffer,
     unsigned char report[TENX_FEATURE_REPORT_SIZE] = {0};
     int result;
     int copy_size;
+    int read_length;
 
     if (!transport || !transport->payload_device || !buffer || !bytes_read ||
         buffer_size < 0) return false;
+    *bytes_read = 0;
+    read_length = buffer_size;
+    if (read_length > TENX_READ_LENGTH) read_length = TENX_READ_LENGTH;
     command_report[1] = 0x55;
     command_report[2] = 0x53;
     command_report[3] = 0x42;
     command_report[4] = 0x43;
+    command_report[6] = (uint8_t)read_length;
     command_report[7] = CAL_USB_READ;
     if (hid_write(transport->command_device, command_report,
                   sizeof(command_report)) != (int)sizeof(command_report)) {

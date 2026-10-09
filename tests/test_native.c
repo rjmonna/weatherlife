@@ -131,19 +131,27 @@ static int test_weather_frame(void)
     WeatherFrameTime time = {12, 31, 23, 59};
     WeatherFrameInput input = {0};
 
+    memset(frame, 0, sizeof(frame));
     bit_packer_init(&packer, frame, sizeof(frame));
     ASSERT_TRUE(weather_frame_append_upd(&packer, &time));
     ASSERT_INT(20, (int)packer.bit_position);
     ASSERT_INT(0xcf, frame[0]);
     ASSERT_INT(0xdf, frame[1]);
-    ASSERT_INT(0xfc, frame[2]);
+    ASSERT_INT(0xb0, frame[2]);
 
     memset(frame, 0, sizeof(frame));
     ASSERT_TRUE(weather_frame_begin_native_primary(&packer, frame));
     ASSERT_INT(84, (int)packer.bit_position);
     ASSERT_INT(0x07, frame[1]);
+    ASSERT_INT(0x10, frame[10]);
     ASSERT_TRUE(weather_frame_append_upd(&packer, &time));
     ASSERT_INT(104, (int)packer.bit_position);
+    ASSERT_INT(0x1c, frame[10]);
+    ASSERT_INT(0x1f, frame[11]);
+    ASSERT_INT(0x1d, frame[12]);
+    ASSERT_INT(0x1f, frame[13]);
+    ASSERT_INT(0x1b, frame[14]);
+    ASSERT_INT(0x10, frame[15]);
 
     time.month = 0;
     ASSERT_TRUE(!weather_frame_append_upd(&packer, &time));
