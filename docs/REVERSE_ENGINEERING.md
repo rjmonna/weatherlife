@@ -202,13 +202,14 @@ The complete `usbdeviceread()` control flow adds these details:
 
 The long passive capture in `traces/device-registration-trace.jsonl` was started
 after `weather.exe` and `usbwr.exe` were already running, then the original
-application's **Device** action was used. It contains 27,067 events over about
+application's **Device** action was used. It contains 65,334 events over about
 17 minutes. The capture shows:
 
-- one initial 17-byte HID report followed by 18 retransmissions of the same
-  16-byte registration payload;
-- 19 `CAL_USB_WRITE` calls and 19 matching command-2 writes;
-- 6,624 repeated read-poll writes of
+- 47 successful 17-byte HID reports through `CAL_USB_WRITE`; the captured
+  stacks do not include the high-level caller, so these cannot be classified
+  as registration or weather payloads;
+- 47 `CAL_USB_WRITE` calls and 47 matching command-2 writes;
+- 15,267 repeated read-poll writes of
   `00 55 53 42 43 00 10 01 00`;
 - every `HidD_GetFeature-return` report was
   `00 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10 10`;
@@ -216,11 +217,12 @@ application's **Device** action was used. It contains 27,067 events over about
   to already-loaded processes and therefore missed the earlier export
   resolution and DLL entry call.
 
-The registration attempt therefore reached the low-level write path and the
-OS accepted the writes, but the device never returned the expected decoded
-echo (`decoded[0] == 0`, `decoded[1] == 9`, and matching id nibbles). The
-missing “Device registration end” is consistent with the native retry loop
-waiting for that response; it is not evidence that registration succeeded.
+All captured feature reports were `0x10`-filled, but this trace alone cannot
+tie those reads to registration because it did not observe `usbdeviceread` or
+the high-level write caller. A separate one-shot probe using the decompiled
+registration builder did receive an ID-matched acknowledgment. Do not use the
+17-byte report length in this trace as proof that a report was a registration
+frame.
 Run `scripts/analyze_trace.py traces/device-registration-trace.jsonl` to print this
 registration summary automatically.
 

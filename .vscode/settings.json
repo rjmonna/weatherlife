@@ -62,5 +62,6 @@
     ]
   },
   "ghidramcp.bridgeScriptPath": "C:\\Users\\rmonn\\bin\\bridge_mcp_ghidra.py",
-  "python.analysis.typeCheckingMode": "strict"
+  "python.analysis.typeCheckingMode": "strict",
+  "mesonbuild.configureOnOpen": true
 }

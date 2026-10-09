@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -16,10 +17,39 @@
     #define SLEEP(ms) usleep((ms) * 1000)
 #endif
 
+static void print_read_response(const char* label, const uint8_t* response,
+                                int response_length)
+{
+    printf("%s (%d bytes):", label, response_length);
+    for (int i = 0; i < response_length; i++) {
+        printf(" %02x", response[i]);
+    }
+    printf("\n");
+}
+
+static bool parse_payload_hex(const char* text, uint8_t payload[WEATHER_FRAME_SIZE])
+{
+    if (!text || strlen(text) != WEATHER_FRAME_SIZE * 2) return false;
+
+    for (int i = 0; i < WEATHER_FRAME_SIZE; i++) {
+        char byte_text[3] = {text[i * 2], text[i * 2 + 1], '\0'};
+        char* end = NULL;
+        unsigned long value = strtoul(byte_text, &end, 16);
+        if (!end || *end != '\0') return false;
+        payload[i] = (uint8_t)value;
+    }
+    return true;
+}
+
 int main(int argc, char* argv[])
 {
     bool replay_observed_frame = argc > 1 &&
                                  strcmp(argv[1], "--replay-observed-frame") == 0;
+    bool read_once = argc > 1 && strcmp(argv[1], "--read-once") == 0;
+    bool probe_registration_once = argc > 1 &&
+                                   strcmp(argv[1], "--probe-registration-once") == 0;
+    bool send_observed_weather_payload_once = argc > 1 &&
+        strcmp(argv[1], "--send-observed-weather-payload-once") == 0;
     bool print_registration_frame = argc > 1 &&
                                     strcmp(argv[1], "--print-registration-frame") == 0;
     bool print_weather_frame = argc > 1 &&
@@ -121,6 +151,96 @@ int main(int argc, char* argv[])
     printf("    PID: 0x%04x\n", device.pid);
     printf("    Path: %s\n", device.device_path);
     printf("    Timeout: %d ms\n", device.timeout_ms);
+
+    if (probe_registration_once || send_observed_weather_payload_once) {
+        uint8_t response[64];
+        int response_length = 0;
+        if (!backend->read_data(&device, response, sizeof(response),
+                                &response_length)) {
+            fprintf(stderr, "[-] Baseline read failed; no payload sent\n");
+            usb_close(&device);
+            backend->free_device_list(devices);
+            return 1;
+        }
+        if (probe_registration_once) {
+            printf("Response before registration: %d bytes (redacted)\n",
+                   response_length);
+        } else {
+            print_read_response("Response before write", response,
+                                response_length);
+        }
+
+        uint8_t payload[WEATHER_FRAME_SIZE];
+        WeatherRegistrationId registration_id;
+        if (probe_registration_once) {
+            srand((unsigned)time(NULL));
+            weather_registration_generate_id(&registration_id);
+            weather_registration_build_frame(&registration_id, payload);
+        } else if (argc != 3 || !parse_payload_hex(argv[2], payload)) {
+            fprintf(stderr,
+                    "[-] Expected exactly 32 hex digits for the captured 16-byte payload\n");
+            usb_close(&device);
+            backend->free_device_list(devices);
+            return 2;
+        }
+
+        if (!backend->write_data(&device, payload, sizeof(payload))) {
+            fprintf(stderr, "[-] One-shot payload write failed\n");
+            usb_close(&device);
+            backend->free_device_list(devices);
+            return 1;
+        }
+        printf("Sent one %s payload.\n",
+               probe_registration_once ? "registration" : "captured weather");
+        SLEEP(100);
+
+        response_length = 0;
+        if (!backend->read_data(&device, response, sizeof(response),
+                                &response_length)) {
+            fprintf(stderr, "[-] Follow-up read failed\n");
+            usb_close(&device);
+            backend->free_device_list(devices);
+            return 1;
+        }
+        if (probe_registration_once) {
+            if (response_length >= WEATHER_REGISTRATION_FRAME_SIZE) {
+                uint8_t decoded[WEATHER_REGISTRATION_FRAME_SIZE];
+                weather_registration_decode_response(response, decoded);
+                printf("Registration acknowledgment: %s\n",
+                       weather_registration_response_matches(decoded,
+                                                             &registration_id)
+                           ? "matched" : "not matched");
+            } else {
+                printf("Registration acknowledgment: response too short\n");
+            }
+        } else {
+            print_read_response("Response after write", response,
+                                response_length);
+        }
+
+        usb_close(&device);
+        backend->free_device_list(devices);
+        return 0;
+    }
+
+    if (read_once) {
+        uint8_t response[256];
+        int response_length = 0;
+        bool read_ok = backend->read_data(&device, response,
+                                          sizeof(response), &response_length);
+        if (read_ok) {
+            printf("Read response (%d bytes):", response_length);
+            for (int i = 0; i < response_length; i++) {
+                printf(" %02x", response[i]);
+            }
+            printf("\n");
+        } else {
+            fprintf(stderr, "[-] Confirmed read poll failed\n");
+        }
+        usb_close(&device);
+        backend->free_device_list(devices);
+        return read_ok ? 0 : 1;
+    }
     
     // Try to initialize device
     printf("\n[*] Initializing device...\n");

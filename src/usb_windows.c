@@ -209,7 +209,7 @@ static bool read_data_windows(USBDevice* device, uint8_t* buffer, int buffer_siz
     if (!device || !device->handle || !buffer || !bytes_read || buffer_size < 0) return false;
 
     context = (DeviceContext*)device->handle;
-    report_size = context->caps.FeatureReportByteLength;
+    report_size = TENX_READ_LENGTH + 1;
     command_report_size = context->command_caps.OutputReportByteLength;
     if (report_size <= 1 || buffer_size < (int)(report_size - 1)) return false;
     if (command_report_size < TENX_COMMAND_HEADER_SIZE + 1) return false;
@@ -219,9 +219,10 @@ static bool read_data_windows(USBDevice* device, uint8_t* buffer, int buffer_siz
     command_report[2] = 0x53;
     command_report[3] = 0x42;
     command_report[4] = 0x43;
-    command_report[5] = TENX_READ_LENGTH;
-    command_report[6] = CAL_USB_READ;
-    command_report[7] = 0;
+    command_report[5] = 0;
+    command_report[6] = TENX_READ_LENGTH;
+    command_report[7] = CAL_USB_READ;
+    command_report[8] = 0;
     bytes_written = 0;
     if (!WriteFile(context->command_file, command_report, command_report_size,
                    &bytes_written, NULL) || bytes_written != command_report_size) {
