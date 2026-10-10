@@ -133,6 +133,16 @@ The passive traces contain these facts only:
    after 17-byte writes (about 150-700 ms in the first observed transitions),
    while later reads can return to `0, 0`. This supports a transient,
    write-associated response state, but does not identify its status meaning.
+- Decompilation of the `usbwr.exe` dispatcher (call at `0x00403dc8`, switch at
+  `0x00404f9a`) shows the exchange is device-polled: the low nibble of response
+  cell 1 is the selector the dongle requests (1 current-condition handler at
+  `0x004053f4`, 6 Day-1 at `0x00405f3b`, 8 later days at `0x00404fc2`; others
+  have no handler). The idle all-`0x10` and the transient `0, 0x0b` response
+  trigger no send. `weather-life-discover --listen-and-answer N` polls, logs
+  response changes and answers only selector 6; a 30 s idle listen saw no
+  request. What makes the dongle request a selector is still unknown, and
+  repeated selector-6 writes and the captured payload (transient `0, 0x0b`)
+  produced no visible display change.
 - On 2026-10-10, one exact 16-byte weather payload captured from the original
    application's `CAL_USB_WRITE` path was sent from an idle baseline. The first
    read after the write returned `10 1b 18 10 10 10 10 10 14 10 10 10 10 12
@@ -267,7 +277,6 @@ condition group remains unmapped.
 
 The daily mappings are static proofs from the executable's group/record skip
 logic, ordered archived fixture, per-slot conversion and append calls, and
-<<<<<<< Updated upstream
 checksum boundary. The 40-bit prefix meaning, current-condition group, other
 forecast selectors, and several helper conversions remain unproven. Two exact
 16-byte reports from the caller-identified weather trace have been replayed
@@ -291,14 +300,26 @@ and recomputed checksum cells 14 and 15; all other cells were unchanged. Its
 first response also decoded to `00 0b`. Together these controlled changes
 prove that current weather and Day-1 forecast inputs both affect weather
 payloads written to the dongle, but do not prove on-screen rendering.
-=======
-checksum boundary. Registration-ack prefix cells are understood
-conditionally; other response-state cell meanings and the current-condition
-group remain unresolved. Selectors 18/19 have code branches but the native
-parser and archived format stop at Day6, so they do not establish Day7 data.
-The exploratory replacement write was observed, but no corresponding
-original-app `CAL_USB_WRITE` capture is available.
->>>>>>> Stashed changes
+
+Selectors 18/19 have code branches, but the native parser and archived format
+stop at Day6, so they do not establish Day7 data. The exploratory replacement
+write was observed, but no corresponding original-app `CAL_USB_WRITE` capture
+is available.
+
+### Hardware registration experiment (2026-10-10)
+
+- `--probe-registration-once` sent one generated registration frame to the
+  Tenx dongle; the follow-up read decoded to the same id (acknowledgment
+  matched). This is the first device response to a host write, so the
+  registration handshake is confirmed on hardware.
+- A 30 s `--listen-and-answer` right after registration saw one non-idle
+  response (`10 19 13 13 13 17 16 15 13 15 13 11 18 10 1f 17`, cell 1 low
+  nibble 9, not selector 1/6/8), then only idle cells. Without registration
+  a 90 s listen saw only idle cells.
+- Registration followed by `--send-selector6-fixture-test-once` produced only
+  idle post-write reads and no visible display change. The dongle never
+  requested selector 1/6/8 in any run, so the trigger for polling and
+  display acceptance remain unproven.
 
 Do not use a byte-oriented command-plus-length payload as an implementation
 contract. The original weather path is a bit-packed serializer; the captured

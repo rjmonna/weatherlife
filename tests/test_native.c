@@ -1,6 +1,7 @@
 #include "bit_packer.h"
 #include "device_registration.h"
 #include "weather_frame.h"
+#include "weather_icons.h"
 #include "weather_response.h"
 
 #include <math.h>
@@ -328,6 +329,18 @@ static int test_selector6_prefix(void)
     return 0;
 }
 
+static int test_icons(void)
+{
+    ASSERT_INT(0, weather_icon_index("SO____"));
+    ASSERT_INT(3, weather_icon_index("BD____"));
+    ASSERT_INT(78, weather_icon_index("WBGR2_"));
+    ASSERT_INT(0, weather_icon_index("MO____"));
+    ASSERT_INT(78, weather_icon_index("MBGR2_"));
+    ASSERT_INT(79, weather_icon_index("bd____"));
+    ASSERT_INT(79, weather_icon_index(NULL));
+    return 0;
+}
+
 int main(void)
 {
     ASSERT_INT(0, test_bit_packer());
@@ -335,6 +348,7 @@ int main(void)
     ASSERT_INT(0, test_response_parser());
     ASSERT_INT(0, test_weather_frame());
     ASSERT_INT(0, test_selector6_prefix());
+    ASSERT_INT(0, test_icons());
     puts("native unit tests passed");
     return 0;
 }

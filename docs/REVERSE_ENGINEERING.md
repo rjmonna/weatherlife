@@ -1575,3 +1575,79 @@ unlocated)
 handshake algorithm (id generation, nibble packing, CRC-8), and an explicit
 refusal to send the unconfirmed byte-oriented weather packet are implemented
 in `src/`. The native weather-field encoder remains experimental.
+
+### Icon Tables and Selector-1 Handler (2026-10-10)
+
+- `usbwr.exe!FUN_00410950` builds two 79-entry stack arrays of 6-character
+  icon names from the `.rdata` strings at `0x447358..0x447837` (copied in
+  descending source order, so index 0 of the first array is `SO____` at
+  `0x447830` and its index 78 is `WBGR2_`; index 0 of the second is `MO____`
+  at `0x4475b8` and its index 78 is `MBGR2_`). It compares with the
+  case-sensitive CRT `strcmp` (the service line is uppercased earlier),
+  searches the first array, then the second, and returns the position or 79.
+  Implemented in `src/weather_icons.c` and `python/weather_icons.py` with
+  golden tests. The 157 files in `images/icons` match these names, which is
+  independent corroboration that the names are real icon identifiers.
+- The selector-1 handler (`0x004053f4`-`0x00405f3b`) is not a current-condition
+  writer. It reads a 5-character code from the dongle response, looks it up in
+  `reg.dat`, and answers with an 80-bit block (20+2+2+8+20 bits, two
+  `CAL_USB_WRITE` chunks). Its field meanings are undecoded; it looks like a
+  city/registration exchange.
+- Still unproven: that the dongle LCD shows the icon for a given index, and
+  what causes the dongle to request selector 6. No LCD mapping exists in the
+  host binaries; it is firmware-side. No current-condition-specific block was
+  found: the selector-6 Day-1 block carries the current temperature/icon
+  fields.
+
+## Full Headless Decompilation of onlywell.dll Transport (verified)
+
+Whole-binary Ghidra dumps of `onlywell.dll`, `usbwr.dll` and `usbwr.exe` were
+compared with `src/hid_transport.c`:
+
+- Command header `55 53 42 43 | len_hi | len_lo | type | mode` (type 1 = read,
+  2 = write, status = `00 00 01 00`); `mode` maps from selector chars
+  `'0'/'1'/'2'`, otherwise stays 0. `usbwr.exe` passes numeric 1..4 (a retry
+  counter), so mode is always 0 on the wire. Our framing is identical.
+- The header goes out on the 8-byte-output interface (usage 3); payloads go out
+  on the 16-byte-output interface (usage 0). `CAL_USB_WRITE` always sends 16 bytes;
+  `CAL_USB_READ` issues the header, then `HidD_GetFeature` on the usage-0 handle
+  with len+1 bytes. Matches the HID report descriptors read from sysfs.
+- `usbwr.exe` startup: `DeviceIni`, `CAL_USB_READ`, retry selector 1..4 on
+  failure, then re-send the nibble-packed registration (100 ms between 16-byte
+  chunks) until a read returns byte0 = 0, byte1 = 9 and 10 nibbles equal the
+  generated id. Weather chunks are written with 2 ms spacing.
+- Conclusion: transport framing, sizes and timing are not the reason the display
+  stayed unchanged; the sweep and fuzz writes produced no visible change.
+
+## Post-Registration Session Loop in `usbwr.exe!FUN_00401400` (decompiled, not yet implemented)
+
+Read from the headless dump (`usbwr.exe.c`, lines ~7636-8339). Confidence: high
+for structure, unproven on hardware. Earlier sweep/fuzz writes (`--sweep-writes`,
+`--fuzz-writes 150`) produced no visible display change; they never followed
+this session order.
+
+Original session order after registration:
+
+1. **Init frame** (sent once after start and after every failed
+   `CAL_USB_READ` -> `Sleep(3000)` -> `DeviceIni` recovery). A 100-byte buffer
+   is filled with `0x10`; `byte[1] |= 0x0A`; cursor starts at byte 2, bit 4.
+   `FUN_0040d340` packs 8 bits from a device.dat-derived byte (`local_430+3`)
+   and 1 flag bit (`local_71c`, initially 1); declared length `0x40` bits;
+   `FUN_0040bc70` finalizes (checksum/nibble pack); one `CAL_USB_WRITE`.
+2. **Poll**: `Sleep(0x82)` (130 ms), `CAL_USB_READ`, up to 4 retries.
+   `FUN_0040ce60` masks each response cell to its low nibble.
+3. **Response selector 0 (idle)**: host sends a **time-sync frame**: the
+   response copy with `byte[1] |= 4`, cursor (7,7), then fields: 3 flag bits
+   (`(local_6f8 ? 4 : 0) | local_6fc`), month(4)/day(5)/hour(5)/minute(6)
+   from the current time, 6 bits at offset 2, 1 bit `local_71c`; 64 bits,
+   one chunk, repeated about every 57 minutes or when `weather.dat` mtime changes.
+4. **Selector 1 / 6 / 8**: city handshake, Day-1 and later-day answers
+   (documented above).
+
+The packer `FUN_0040d340` stores data in each byte's low nibble (`0x10`
+filler kept in the high nibble); `FUN_0040cee0` is the nibble-array variant.
+
+Open: the init and time-sync frames are the only host-initiated frames our
+native code does not emit. They are the next candidates for making the
+display react; implementing them requires decoding `FUN_0040bc70` and the
+source of `local_430` first.

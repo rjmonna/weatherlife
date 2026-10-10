@@ -19,6 +19,7 @@ set(COMMON_SOURCES
     src/bit_packer.c
     src/weather_frame.h
     src/weather_frame.c
+    src/weather_icons.c
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")

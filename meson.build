@@ -45,6 +45,7 @@ usb_lib_sources = [
   'src/device_registration.c',
   'src/bit_packer.c',
   'src/weather_frame.c',
+  'src/weather_icons.c',
 ] + platform_files
 
 usb_lib = static_library(

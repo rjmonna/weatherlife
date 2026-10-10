@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from dongle_protocol import build_registration_frame, response_matches  # noqa: E402
 from experiment_tenx import build_feature_report, parse_hex_bytes  # noqa: E402
+from weather_icons import icon_index  # noqa: E402
 from legacy_weather_csv import parse_city_table, parse_legacy_weather  # noqa: E402
 from weather_provider import (  # noqa: E402
     CurrentWeather,
@@ -148,6 +149,16 @@ class WeatherProviderTests(unittest.TestCase):
     def test_weather_code_description_has_known_and_unknown_values(self):
         self.assertEqual(weather_code_description(0), "Clear")
         self.assertEqual(weather_code_description(999), "Unknown (999)")
+
+
+class IconTests(unittest.TestCase):
+    def test_icon_index(self):
+        self.assertEqual(icon_index("SO____"), 0)
+        self.assertEqual(icon_index("BD____"), 3)
+        self.assertEqual(icon_index("WBGR2_"), 78)
+        self.assertEqual(icon_index("MO____"), 0)
+        self.assertEqual(icon_index("MBGR2_"), 78)
+        self.assertEqual(icon_index("bd____"), 79)
 
 
 class TraceUtilityTests(unittest.TestCase):
