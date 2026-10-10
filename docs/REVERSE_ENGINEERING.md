@@ -484,11 +484,13 @@ before them, the branch appends fields with widths 7, conditional 6/8, 4, 5,
 `UPD` starts at bit zero followed directly by the current-condition fields.
 
 The same dispatcher calls `FUN_0040bc70` through its thunk `0x00401069` after
-building packed segments. `FUN_0040bc70` computes a table-driven checksum over
-the packed nibble bytes and appends the result as two `0x10`-prefixed nibbles.
-This is a newly identified native payload checksum path, separate from the
-registration-frame CRC, but its exact covered range still needs a captured
-call-level comparison before it can be added to the replacement encoder.
+building packed segments. It uses the same lookup table and nibble-pair
+reconstruction algorithm as `usbwr.dll!thunk_FUN_100018b0`; the bit-length
+argument selects the coverage and checksum-cell positions. For the 128-bit
+primary segment it checks 15 reconstructed bytes and appends checksum nibbles
+at cells 30 and 31. Registration uses the same algorithm with a 64-bit length,
+covering seven reconstructed bytes and storing its checksum in cells 14 and
+15. The algorithm is shared; the frames and their coverage are distinct.
 
 To promote the composite encoder, the remaining work is concrete: trace the
 dispatcher cases that populate working-buffer bytes `0..9`, map each append
@@ -497,6 +499,64 @@ source to `TEMP`, `BTEMP`, `WEA`, `PRE`, `TREND`, `WS`, `BFT`, `WW`, `HUM`,
 field list. Then replay one-field legacy fixtures and require byte-for-byte
 agreement with the original `CAL_USB_WRITE` payload before enabling hardware
 transmission.
+
+### Weather Write Caller and Response Dispatch (2026-10-09)
+
+Ghidra confirms the captured writer's call chain: `entry` calls
+`thunk_FUN_00401400` with the standard WinMain arguments; that thunk jumps to
+`FUN_00401400`. The captured stack return address `0x00404eef` is immediately
+after the indirect `CAL_USB_WRITE` call at `0x00404ee9` inside that dispatcher.
+That block computes a `0x40`-bit segment and sends one 16-byte
+`CAL_USB_WRITE` payload report, so the caller-identified
+`weather-fixture-trace.jsonl` writes are native serializer output, not
+registration frames. `FUN_004137a0` is only a dynamically resolved
+`CAL_USB_WRITE` wrapper and has no static callers.
+
+The matching read call is at `0x00403dc8` (the captured return address is
+`0x00403dce`). Its response passes through `thunk_FUN_0040ce60`, which masks
+each of 16 bytes with `0x0f`. The dispatcher uses decoded byte 1 as a selector:
+handlers exist for `1`, `6`, and `8`; a response with decoded prefix `00 0b`
+falls through to the shared continuation and has no explicit success/error
+handler. That continuation sends another `0x40`-bit segment only if a separate
+pending-send flag is set; selector `0x0b` itself does not set that flag. The
+live `0x0b` report is therefore a real post-write device response, but its
+status meaning and display effect are not established by this executable.
+
+The 1,819 historical `0x0b` reports checked from the controlled, long-capture,
+and reconnect traces do not match the registration frame's 64-bit checksum
+layout. This distinguishes them from registration acknowledgments; it does
+not prove a weather-response checksum.
+
+### Fixture-Backed Forecast Write Differential (2026-10-09)
+
+The original Weather-Life `Data Refresh` tray command was captured while its
+HTTP request was redirected to the archived Rotterdam CSV. With the redirect
+buffer lifetime fixed in `scripts/trace_weatherlife.py`, `InternetOpenUrlA`
+returned success and `InternetReadFile` read all 5,642 fixture bytes. The
+native helper then emitted 64-bit, 16-cell weather segments at callsites
+`0x00404b89` and `0x00404eef`. Captured cells all had the `0x10` prefix, and
+the 64-bit checksum in cells 14 and 15 matched the decompiled native table
+algorithm.
+
+A controlled second refresh served a temporary fixture changing only
+`DAY1/TEMPH` from `6` to `12`; the archived source was not modified. Comparing
+the first post-fetch write at `0x00404b89` showed exactly three changed cells:
+cell 8 changed `0x14` to `0x18`, and checksum cells 14 and 15 were recomputed.
+The other 13 cells were identical, and both segments passed the native
+64-bit checksum check. This is runtime evidence that a Day-1 forecast field
+flows through the original parser/serializer into a write accepted by the HID
+transport. The following response still decoded to `00 0b`; the visible
+forecast grid remained placeholders, so display acceptance/rendering is not
+proven. The 128-bit selector-6 primary segment and its complete Day-1 layout
+were not observed in this refresh.
+
+A separate fixture changed only current `TEMP` from `-1.0 C` to `10.0 C`. Its
+first post-fetch `0x00404b89` write changed the same data cell from `0x14` to
+`0x1c`, with only checksum cells 14 and 15 also changing. The 64-bit checksum
+remained valid and the first response again decoded to `00 0b`. These
+independent current-weather and Day-1 forecast mutations prove both inputs
+flow through the original serializer into dongle writes; neither proves that
+the display accepts or renders the data.
 
 ### Final HID Wire Offset Proven (2026-09-17)
 

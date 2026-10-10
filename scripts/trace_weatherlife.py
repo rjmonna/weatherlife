@@ -146,7 +146,10 @@ function hookInternetOpenUrl(symbolName, wide) {
                 var pathStart = this.url.indexOf('/', this.url.indexOf('://') + 3);
                 var path = pathStart >= 0 ? this.url.substring(pathStart) : '/';
                 var redirected = redirectBase + path;
-                args[1] = wide ? Memory.allocUtf16String(redirected) : Memory.allocUtf8String(redirected);
+                this.redirectedBuffer = wide
+                    ? Memory.allocUtf16String(redirected)
+                    : Memory.allocUtf8String(redirected);
+                args[1] = this.redirectedBuffer;
                 this.redirectedUrl = redirected;
             }
             event({api: symbolName, url: this.url,

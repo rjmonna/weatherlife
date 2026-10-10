@@ -103,10 +103,11 @@ That wrapper truncates returned data at the first zero byte, so it is not a
 binary-safe 16-byte read API.
 
 This `USBC` control header is transport framing, not the weather serializer's
-logical 40-bit prefix. The prefix semantics, full weather payload, and weather
-acknowledgment remain unproven; no guessed weather packet should be sent.
+logical 40-bit prefix. The full weather payload and display/rendering result
+remain unproven. Hardware experiments used exact 16-byte payloads from a
+caller-identified original trace, not guessed encoder output.
 
-## Device-button registration capture
+## Device-button action capture
 
 The passive capture `traces/device-registration-trace.jsonl` recorded the original
 application's Device action for about 17 minutes. Analyze it with:
@@ -180,12 +181,32 @@ unmapped.
 The selector-6 mapping is a static proof from the executable's group-skip
 logic, ordered archived fixture, per-slot conversion and append calls, and
 checksum boundary. The 40-bit prefix meaning, current-condition group, other
-forecast selectors, and several helper conversions remain unproven. No
-`CAL_USB_WRITE` weather buffer has been captured at runtime.
+forecast selectors, and several helper conversions remain unproven. Two exact
+16-byte reports from the caller-identified weather trace have been replayed
+once each; they produced `0x0B`-prefixed responses, but the display result was
+not observed.
+
+A controlled original-app refresh provides a separate end-to-end data-path
+proof. The corrected tracer redirected the original URL to the archived
+5,642-byte Rotterdam CSV, and `InternetOpenUrlA` succeeded. The native app
+consumed the fixture and emitted 64-bit weather segments at `0x00404b89` and
+`0x00404eef`; each captured segment used `0x10`-prefixed nibble cells and
+passed the native checksum. A second fixture changed only Day-1 `TEMPH` from
+`6` to `12`. The first post-fetch `0x00404b89` payload changed physical cell 8
+from `0x14` to `0x18` and recomputed checksum cells 14 and 15; all other cells
+were unchanged. Both writes were followed by the same decoded `00 0b` response.
+This proves that a Day-1 forecast input affects checksum-valid weather data
+written to the dongle. It does not prove the display accepted or rendered it.
+An independent fixture changed only current `TEMP` from `-1.0 C` to `10.0 C`.
+The first post-fetch `0x00404b89` payload changed cell 8 from `0x14` to `0x1c`
+and recomputed checksum cells 14 and 15; all other cells were unchanged. Its
+first response also decoded to `00 0b`. Together these controlled changes
+prove that current weather and Day-1 forecast inputs both affect weather
+payloads written to the dongle, but do not prove on-screen rendering.
 
 Do not use a byte-oriented command-plus-length payload as an implementation
-contract. The original weather path is a bit-packed
-serializer and must first be captured at the `CAL_USB_WRITE` call boundary.
+contract. The original weather path is a bit-packed serializer; the captured
+replays do not validate the incomplete replacement encoder.
 
 ## Evidence standard
 
