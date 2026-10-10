@@ -55,6 +55,100 @@ static bool parse_payload_hex(const char* text, uint8_t payload[WEATHER_FRAME_SI
     return true;
 }
 
+static WeatherFrameNativeSelector6Fields selector6_fixture_test_fields(void)
+{
+    WeatherFrameNativeSelector6Fields fields = {
+        .temperature_high = 6,
+        .temperature_low = 0x1fc,
+        .morning_icon_index = 79,
+        .wind_speed = 9,
+        .beaufort = 2,
+        .weather_word = 0,
+        .afternoon_direction_index = 8,
+        .afternoon_wind_speed = 20,
+        .afternoon_beaufort = 34,
+        .afternoon_weather_word = 0,
+        .afternoon_humidity = 82
+    };
+    return fields;
+}
+
+static void print_selector6_segment(const uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    printf("Selector-6 segment (32 nibble cells):");
+    for (size_t i = 0; i < WEATHER_FRAME_NATIVE_SEGMENT_CELLS; i++) {
+        printf(" %02x", frame[i]);
+    }
+    printf("\n");
+}
+
+static bool write_native_segment(USBBackend* backend, USBDevice* device,
+                                 const uint8_t* frame, size_t cell_count)
+{
+    const size_t chunk_size = 16;
+
+    if (!backend || !device || !frame || cell_count == 0 ||
+        cell_count % chunk_size != 0) {
+        return false;
+    }
+
+    for (size_t offset = 0; offset < cell_count; offset += chunk_size) {
+        if (!backend->write_data(device, frame + offset, (int)chunk_size)) {
+            fprintf(stderr, "[-] Native payload chunk at cell %zu failed; segment may be partial\n",
+                    offset);
+            return false;
+        }
+        if (offset + chunk_size < cell_count) {
+            SLEEP(2);
+        }
+    }
+    return true;
+}
+
+static bool run_selector6_fixture_test_once(USBBackend* backend,
+                                            USBDevice* device)
+{
+    uint8_t readback[WEATHER_FRAME_SIZE];
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
+    int response_length = 0;
+    WeatherFrameNativeSelector6Fields fields = selector6_fixture_test_fields();
+
+    if (!backend->read_data(device, readback, sizeof(readback),
+                            &response_length) || response_length < 10) {
+        fprintf(stderr, "[-] Prefix read failed or was shorter than ten cells; no write sent\n");
+        return false;
+    }
+    if (!weather_frame_build_native_selector6(readback, (size_t)response_length,
+                                               &fields, frame)) {
+        fprintf(stderr, "[-] Could not build selector-6 fixture test frame; no write sent\n");
+        return false;
+    }
+
+    print_selector6_segment(frame);
+    printf("Icon index 79 and direction index 8 exercise documented unknown-value fallbacks.\n");
+
+    if (!write_native_segment(backend, device, frame,
+                              WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
+        return false;
+    }
+
+    printf("Sent one 128-bit selector-6 segment as two 16-cell writes with 2 ms pacing.\n");
+    for (int poll = 0; poll < 6; poll++) {
+        uint8_t response[WEATHER_FRAME_SIZE];
+        response_length = 0;
+        SLEEP(100);
+        if (!backend->read_data(device, response, sizeof(response),
+                                &response_length)) {
+            fprintf(stderr, "[-] Post-write read poll %d failed\n", poll + 1);
+            return false;
+        }
+        char label[48];
+        snprintf(label, sizeof(label), "Post-write read %d", poll + 1);
+        print_read_response(label, response, response_length);
+    }
+    return true;
+}
+
 int main(int argc, char* argv[])
 {
     bool replay_observed_frame = argc > 1 &&
@@ -64,10 +158,29 @@ int main(int argc, char* argv[])
                                    strcmp(argv[1], "--probe-registration-once") == 0;
     bool send_observed_weather_payload_once = argc > 1 &&
         strcmp(argv[1], "--send-observed-weather-payload-once") == 0;
+    bool send_selector6_fixture_test_once = argc > 1 &&
+        strcmp(argv[1], "--send-selector6-fixture-test-once") == 0;
+    bool print_selector6_fixture_test = argc > 1 &&
+        strcmp(argv[1], "--print-selector6-fixture-test") == 0;
     bool print_registration_frame = argc > 1 &&
                                     strcmp(argv[1], "--print-registration-frame") == 0;
     bool print_weather_frame = argc > 1 &&
                               strcmp(argv[1], "--print-weather-frame") == 0;
+
+    if (print_selector6_fixture_test) {
+        uint8_t readback[WEATHER_FRAME_SIZE];
+        uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
+        WeatherFrameNativeSelector6Fields fields = selector6_fixture_test_fields();
+        memset(readback, 0x10, sizeof(readback));
+        if (!weather_frame_build_native_selector6(readback, sizeof(readback),
+                                                   &fields, frame)) {
+            fprintf(stderr, "[-] Could not build selector-6 fixture test frame\n");
+            return 1;
+        }
+        print_selector6_segment(frame);
+        printf("Readback prefix is the observed idle marker state; icon/direction use unknown fallbacks.\n");
+        return 0;
+    }
 
     if (print_weather_frame) {
         WeatherFrameTime sample_time = {9, 17, 14, 30};
@@ -165,6 +278,13 @@ int main(int argc, char* argv[])
     printf("    PID: 0x%04x\n", device.pid);
     printf("    Path: %s\n", device.device_path);
     printf("    Timeout: %d ms\n", device.timeout_ms);
+
+    if (send_selector6_fixture_test_once) {
+        bool sent_and_polled = run_selector6_fixture_test_once(backend, &device);
+        usb_close(&device);
+        backend->free_device_list(devices);
+        return sent_and_polled ? 0 : 1;
+    }
 
     if (probe_registration_once || send_observed_weather_payload_once) {
         uint8_t response[64];

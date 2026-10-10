@@ -63,5 +63,15 @@
   },
   "ghidramcp.bridgeScriptPath": "C:\\Users\\rmonn\\bin\\bridge_mcp_ghidra.py",
   "python.analysis.typeCheckingMode": "strict",
-  "mesonbuild.configureOnOpen": true
+  "mesonbuild.configureOnOpen": true,
+  "chat.tools.terminal.autoApprove": {
+    "/^find /mnt /home/rjmonna -maxdepth 4 -type f \\\\\\( -iname 'weather\\.exe' -o -iname 'usbwr\\.exe' -o -iname 'onlywell\\.dll' \\\\\\) -print 2>/dev/null \\| head -40; printf '\\\\nWine prefix binaries:\\\\n'; find /home/rjmonna/\\.wine -maxdepth 5 -type f \\\\\\( -iname 'weather\\.exe' -o -iname 'usbwr\\.exe' \\\\\\) -print 2>/dev/null \\| head -20$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^id; lsusb -d 1130:0202 2>&1 \\|\\| true; ls -l builddir/weather-life-discover builddir/tests/weather-life-native-tests 2>&1 \\|\\| true; meson test -C builddir --print-errorlogs$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  }
 }

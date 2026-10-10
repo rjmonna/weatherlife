@@ -59,6 +59,207 @@ bool weather_frame_begin_native_primary(BitPacker* packer,
     return true;
 }
 
+bool weather_frame_begin_native_selector6(
+    BitPacker* packer, const uint8_t* readback_cells, size_t readback_size,
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    if (!packer || !readback_cells || !frame ||
+        readback_size < WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS) {
+        return false;
+    }
+
+    for (size_t i = 0; i < WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS; i++) {
+        frame[i] = readback_cells[i] & 0x0f;
+    }
+    frame[1] |= 0x07;
+    memset(frame + WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS, 0x10,
+           WEATHER_FRAME_NATIVE_SEGMENT_CELLS -
+               WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS);
+    bit_packer_init_at(packer, frame, WEATHER_FRAME_NATIVE_SEGMENT_CELLS,
+                       WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS,
+                       WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET);
+    return true;
+}
+
+bool weather_frame_append_native_selector6_fields(
+    BitPacker* packer, const WeatherFrameNativeSelector6Fields* fields)
+{
+    if (!packer || !fields || !packer->native_cursor ||
+        packer->native_byte_offset != WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET ||
+        packer->native_bit_offset != WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET ||
+        packer->buffer_size < WEATHER_FRAME_NATIVE_SEGMENT_CELLS) {
+        return false;
+    }
+
+    bit_packer_append(packer, fields->temperature_high, 9);
+    bit_packer_append(packer, fields->temperature_low, 9);
+    bit_packer_append(packer, fields->morning_icon_index, 7);
+    bit_packer_append(packer, fields->wind_speed, 11);
+    bit_packer_append(packer, fields->beaufort, 2);
+    bit_packer_append(packer, fields->weather_word, 8);
+    bit_packer_append(packer, fields->afternoon_direction_index, 5);
+    bit_packer_append(packer, fields->afternoon_wind_speed, 7);
+    bit_packer_append(packer, fields->afternoon_beaufort, 8);
+    bit_packer_append(packer, fields->afternoon_weather_word, 5);
+    bit_packer_append(packer, fields->afternoon_humidity, 8);
+    return packer->bit_position ==
+           WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET * 8 +
+               WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET +
+               WEATHER_FRAME_NATIVE_SELECTOR6_FIELDS_BIT_LENGTH;
+}
+
+static uint8_t selector6_checksum_table_value(uint8_t value)
+{
+    for (int bit = 0; bit < 8; bit++) {
+        value = (value & 0x80)
+                    ? (uint8_t)((value << 1) ^ 0x31)
+                    : (uint8_t)(value << 1);
+    }
+    return value;
+}
+
+static bool finalize_native_primary(BitPacker* packer,
+                                    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS],
+                                    size_t field_bit_length)
+{
+    uint8_t checksum = 0;
+    const size_t expected_position =
+        WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET * 8 +
+        WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET +
+        field_bit_length;
+    const size_t data_end_bit =
+        WEATHER_FRAME_NATIVE_SELECTOR6_FIELDS_BIT_OFFSET + field_bit_length;
+
+    if (!packer || !frame || !packer->native_cursor ||
+        packer->buffer != frame ||
+        packer->buffer_size < WEATHER_FRAME_NATIVE_SEGMENT_CELLS ||
+        data_end_bit > 120 ||
+        packer->bit_position != expected_position) {
+        return false;
+    }
+
+    for (size_t pad_bit = data_end_bit; pad_bit < 120; pad_bit++) {
+        bit_packer_append(packer, 0, 1);
+    }
+    if (packer->bit_position != expected_position + 120 - data_end_bit) {
+        return false;
+    }
+
+    for (size_t logical_byte = 0; logical_byte < 15; logical_byte++) {
+        uint8_t high_nibble = frame[logical_byte * 2] & 0x0f;
+        uint8_t low_nibble = frame[logical_byte * 2 + 1] & 0x0f;
+        uint8_t value = (uint8_t)((high_nibble << 4) | low_nibble);
+        checksum ^= selector6_checksum_table_value(value);
+    }
+
+    frame[30] |= (uint8_t)(0x10 | (checksum >> 4));
+    frame[31] |= (uint8_t)(checksum & 0x0f);
+    return true;
+}
+
+bool weather_frame_finalize_native_selector6(
+    BitPacker* packer, uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    return finalize_native_primary(
+        packer, frame, WEATHER_FRAME_NATIVE_SELECTOR6_FIELDS_BIT_LENGTH);
+}
+
+bool weather_frame_build_native_selector6(
+    const uint8_t* readback_cells, size_t readback_size,
+    const WeatherFrameNativeSelector6Fields* fields,
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    BitPacker packer;
+
+    if (!frame ||
+        !weather_frame_begin_native_selector6(&packer, readback_cells,
+                                              readback_size, frame) ||
+        !weather_frame_append_native_selector6_fields(&packer, fields) ||
+        !weather_frame_finalize_native_selector6(&packer, frame)) {
+        return false;
+    }
+    return true;
+}
+
+static bool native_forecast_cursor_ready(const BitPacker* packer,
+                                        const uint8_t* frame)
+{
+    return packer && frame && packer->native_cursor &&
+           packer->buffer == frame &&
+           packer->native_byte_offset == WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET &&
+           packer->native_bit_offset == WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET &&
+           packer->buffer_size >= WEATHER_FRAME_NATIVE_SEGMENT_CELLS;
+}
+
+bool weather_frame_build_native_later_day_first(
+    const uint8_t* readback_cells, size_t readback_size,
+    const WeatherFrameNativeLaterDayFirstFields* fields,
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    BitPacker packer;
+
+    if (!fields || !weather_frame_begin_native_selector6(
+                       &packer, readback_cells, readback_size, frame) ||
+        !native_forecast_cursor_ready(&packer, frame)) {
+        return false;
+    }
+
+    bit_packer_append(&packer, fields->temperature_high, 9);
+    bit_packer_append(&packer, fields->temperature_low, 9);
+    bit_packer_append(&packer, fields->morning_icon_index, 7);
+    bit_packer_append(&packer, fields->wind_speed, 8);
+    bit_packer_append(&packer, fields->weather_direction_index, 5);
+    bit_packer_append(&packer, fields->humidity, 7);
+    bit_packer_append(&packer, fields->afternoon_icon_index, 7);
+    bit_packer_append(&packer, fields->afternoon_wind_speed, 8);
+    bit_packer_append(&packer, fields->afternoon_direction_index, 5);
+    bit_packer_append(&packer, fields->afternoon_humidity, 7);
+    bit_packer_append(&packer, fields->night_icon_index, 7);
+
+    if (packer.bit_position != WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET * 8 +
+                                   WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET +
+                                   WEATHER_FRAME_NATIVE_LATER_DAY_FIRST_BIT_LENGTH) {
+        return false;
+    }
+    return finalize_native_primary(&packer, frame,
+                                  WEATHER_FRAME_NATIVE_LATER_DAY_FIRST_BIT_LENGTH);
+}
+
+bool weather_frame_build_native_later_day_second(
+    const uint8_t* readback_cells, size_t readback_size,
+    const WeatherFrameNativeLaterDaySecondFields* fields,
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    BitPacker packer;
+
+    if (!fields || !weather_frame_begin_native_selector6(
+                       &packer, readback_cells, readback_size, frame) ||
+        !native_forecast_cursor_ready(&packer, frame)) {
+        return false;
+    }
+
+    bit_packer_append(&packer, fields->night_wind_speed, 8);
+    bit_packer_append(&packer, fields->night_direction_index, 5);
+    bit_packer_append(&packer, fields->night_humidity, 7);
+    bit_packer_append(&packer, fields->sunrise_hour, 5);
+    bit_packer_append(&packer, fields->sunrise_minute, 6);
+    bit_packer_append(&packer, fields->sunset_hour, 5);
+    bit_packer_append(&packer, fields->sunset_minute, 6);
+    bit_packer_append(&packer, fields->precipitation_percent, 7);
+    bit_packer_append(&packer, fields->rainfall, 8);
+    bit_packer_append(&packer, fields->sunshine_hours, 5);
+    bit_packer_append(&packer, fields->uv_index, 5);
+    bit_packer_append(&packer, fields->dew_point, 8);
+
+    if (packer.bit_position != WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET * 8 +
+                                   WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET +
+                                   WEATHER_FRAME_NATIVE_LATER_DAY_SECOND_BIT_LENGTH) {
+        return false;
+    }
+    return finalize_native_primary(&packer, frame,
+                                  WEATHER_FRAME_NATIVE_LATER_DAY_SECOND_BIT_LENGTH);
+}
+
 bool weather_frame_build_proven_upd(const WeatherFrameTime* time,
                                     uint8_t frame[WEATHER_FRAME_SIZE])
 {

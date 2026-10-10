@@ -183,12 +183,158 @@ static int test_weather_frame(void)
     return 0;
 }
 
+static int test_selector6_prefix(void)
+{
+    uint8_t readback[WEATHER_FRAME_SIZE];
+    uint8_t cells[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
+    BitPacker packer;
+    WeatherFrameNativeSelector6Fields fixture_fields = {
+        .temperature_high = 6,
+        .temperature_low = 0x1fc,
+        .morning_icon_index = 79,
+        .wind_speed = 9,
+        .beaufort = 2,
+        .weather_word = 0,
+        .afternoon_direction_index = 8,
+        .afternoon_wind_speed = 20,
+        .afternoon_beaufort = 34,
+        .afternoon_weather_word = 0,
+        .afternoon_humidity = 82
+    };
+    WeatherFrameNativeLaterDayFirstFields day2_first = {
+        .temperature_high = 5,
+        .temperature_low = 0x1fc,
+        .morning_icon_index = 79,
+        .wind_speed = 10,
+        .weather_direction_index = 7,
+        .humidity = 97,
+        .afternoon_icon_index = 79,
+        .afternoon_wind_speed = 15,
+        .afternoon_direction_index = 7,
+        .afternoon_humidity = 66,
+        .night_icon_index = 79
+    };
+    WeatherFrameNativeLaterDaySecondFields day2_second = {
+        .night_wind_speed = 9,
+        .night_direction_index = 7,
+        .night_humidity = 84,
+        .sunrise_hour = 7,
+        .sunrise_minute = 11,
+        .sunset_hour = 18,
+        .sunset_minute = 36,
+        .precipitation_percent = 5,
+        .rainfall = 0,
+        .sunshine_hours = 7,
+        .uv_index = 3,
+        .dew_point = 0xff
+    };
+    const uint8_t expected_fixture_segment[WEATHER_FRAME_NATIVE_SEGMENT_CELLS] = {
+        0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x10, 0x13, 0x17, 0x1f, 0x12, 0x17,
+        0x18, 0x10, 0x19, 0x18, 0x10, 0x11, 0x10, 0x15,
+        0x10, 0x18, 0x18, 0x10, 0x1a, 0x14, 0x1c, 0x16
+    };
+    const uint8_t expected_day2_first[WEATHER_FRAME_NATIVE_SEGMENT_CELLS] = {
+        0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x10, 0x12, 0x1f, 0x1f, 0x12, 0x17,
+        0x18, 0x15, 0x11, 0x1f, 0x10, 0x1c, 0x1f, 0x10,
+        0x1f, 0x13, 0x1c, 0x12, 0x19, 0x1e, 0x18, 0x17
+    };
+    const uint8_t expected_day2_second[WEATHER_FRAME_NATIVE_SEGMENT_CELLS] = {
+        0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x10, 0x19, 0x13, 0x1d, 0x14, 0x13,
+        0x19, 0x17, 0x12, 0x19, 0x10, 0x12, 0x18, 0x10,
+        0x11, 0x1c, 0x17, 0x1f, 0x1e, 0x10, 0x16, 0x19
+    };
+    WeatherFrameNativeSelector6Fields fields = {
+        .temperature_high = 0x1ff,
+        .temperature_low = 0x1ff,
+        .morning_icon_index = 0x7f,
+        .wind_speed = 0x7ff,
+        .beaufort = 0x03,
+        .weather_word = 0xff,
+        .afternoon_direction_index = 0x1f,
+        .afternoon_wind_speed = 0x7f,
+        .afternoon_beaufort = 0xff,
+        .afternoon_weather_word = 0x1f,
+        .afternoon_humidity = 0xff
+    };
+
+    memset(readback, 0x10, sizeof(readback));
+    ASSERT_TRUE(weather_frame_begin_native_selector6(&packer, readback,
+                                                       sizeof(readback), cells));
+    ASSERT_INT(0x00, cells[0]);
+    ASSERT_INT(0x07, cells[1]);
+    for (int i = 2; i < WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS; i++) {
+        ASSERT_INT(0x00, cells[i]);
+    }
+    for (int i = WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS;
+         i < WEATHER_FRAME_NATIVE_SEGMENT_CELLS; i++) {
+        ASSERT_INT(0x10, cells[i]);
+    }
+    ASSERT_INT(84, (int)packer.bit_position);
+
+    readback[1] = 0x19;
+    for (int i = 0; i < 10; i++) readback[i + 2] = (uint8_t)(0x20 | i);
+    ASSERT_TRUE(weather_frame_begin_native_selector6(&packer, readback,
+                                                       sizeof(readback), cells));
+    ASSERT_INT(0x00, cells[0]);
+    ASSERT_INT(0x0f, cells[1]);
+    for (int i = 0; i < 8; i++) ASSERT_INT(i, cells[i + 2]);
+    ASSERT_TRUE(weather_frame_append_native_selector6_fields(&packer, &fields));
+    ASSERT_INT(163, (int)packer.bit_position);
+    for (int i = WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS; i < 29; i++) {
+        ASSERT_INT(0x1f, cells[i]);
+    }
+    ASSERT_INT(0x1e, cells[29]);
+    ASSERT_TRUE(weather_frame_finalize_native_selector6(&packer, cells));
+    ASSERT_INT(164, (int)packer.bit_position);
+    ASSERT_TRUE((cells[30] & 0xf0) == 0x10);
+    ASSERT_TRUE((cells[31] & 0xf0) == 0x10);
+    ASSERT_TRUE(!weather_frame_finalize_native_selector6(&packer, cells));
+
+    readback[1] = 0x1b;
+    ASSERT_TRUE(weather_frame_begin_native_selector6(&packer, readback,
+                                                       sizeof(readback), cells));
+    ASSERT_INT(0x0f, cells[1]);
+    ASSERT_INT(0x00, cells[2]);
+    ASSERT_TRUE(!weather_frame_begin_native_selector6(&packer, readback, 9,
+                                                        cells));
+    ASSERT_TRUE(!weather_frame_begin_native_selector6(NULL, readback,
+                                                        sizeof(readback), cells));
+    ASSERT_TRUE(weather_frame_build_native_selector6(readback, sizeof(readback),
+                                                       &fields, cells));
+    ASSERT_TRUE((cells[30] & 0xf0) == 0x10);
+    ASSERT_TRUE((cells[31] & 0xf0) == 0x10);
+    ASSERT_TRUE(!weather_frame_build_native_selector6(readback, 9, &fields,
+                                                        cells));
+    ASSERT_TRUE(!weather_frame_build_native_selector6(readback,
+                                                        sizeof(readback), NULL,
+                                                        cells));
+
+    memset(readback, 0x10, sizeof(readback));
+    ASSERT_TRUE(weather_frame_build_native_selector6(readback, sizeof(readback),
+                                                       &fixture_fields, cells));
+    ASSERT_TRUE(memcmp(cells, expected_fixture_segment,
+                       sizeof(expected_fixture_segment)) == 0);
+    ASSERT_TRUE(weather_frame_build_native_later_day_first(
+        readback, sizeof(readback), &day2_first, cells));
+    ASSERT_TRUE(memcmp(cells, expected_day2_first,
+                       sizeof(expected_day2_first)) == 0);
+    ASSERT_TRUE(weather_frame_build_native_later_day_second(
+        readback, sizeof(readback), &day2_second, cells));
+    ASSERT_TRUE(memcmp(cells, expected_day2_second,
+                       sizeof(expected_day2_second)) == 0);
+    return 0;
+}
+
 int main(void)
 {
     ASSERT_INT(0, test_bit_packer());
     ASSERT_INT(0, test_registration());
     ASSERT_INT(0, test_response_parser());
     ASSERT_INT(0, test_weather_frame());
+    ASSERT_INT(0, test_selector6_prefix());
     puts("native unit tests passed");
     return 0;
 }

@@ -38,6 +38,152 @@ single-record native output boundary, but it does not assign weather fields:
 the source response was not changed one named record at a time. Run
 `scripts/prove_encoder.py` with both traces to reproduce the bit comparison.
 
+### Cross-runtime C validation (2026-10-10)
+
+The current native C tests pass in the Linux Meson build. The same pure-C test
+sources (`test_native.c`, `device_registration.c`, `bit_packer.c`,
+`weather_response.c`, and `weather_frame.c`) also compile with MinGW x86-64
+under `-Wall -Wextra -Werror` and pass when run with Wine 10 x64. This validates
+the tested C logic under the Windows ABI; it does not validate the Windows HID
+backend, 32-bit binaries, or communication with the physical device through
+Wine. The connected device was separately checked through the Linux backend
+with a read-only poll, which returned sixteen `0x10` cells.
+
+### Headless decompilation of `onlywell.dll` (2026-10-10)
+
+The installed `C:\Program Files (x86)\Weather\onlywell.dll` was imported into
+Ghidra 11.1 headlessly as a 32-bit x86 PE. The following transport call chain
+was decompiled from the installed binary:
+
+| Address | Function | Confirmed behavior |
+| --- | --- | --- |
+| `0x10001ef0` | `CAL_USB_WRITE` | Allocates a 17-byte report buffer, copies exactly 16 caller bytes to offsets 1..16, and calls the low-level writer. |
+| `0x10001b80` | `FUN_10001b80` | Builds the eight-byte `USBC` write header, sends it to the command handle, then sends the caller payload to the payload handle. |
+| `0x100019f0` | `FUN_100019f0` | Copies each payload byte into the HID report buffer at offset 1 and calls `WriteFile` using the HID output-report length. |
+| `0x10001ab0` | `FUN_10001ab0` | Builds the eight-byte `USBC` read header, sends it, then calls `HidD_GetFeature` for the requested report length plus the report ID. |
+| `0x10001970` | `FUN_10001970` | Sends the status/read header and performs a 17-byte `HidD_GetFeature` call. |
+| `0x10001000` | `FUN_10001000` | Enumerates HID interfaces and opens two matching Tenx handles. |
+| `0x100011d0` | `FUN_100011d0` | Opens a HID path, verifies VID `0x1130` and PID `0x0202`, checks HID capabilities, and records the handle. |
+
+`FUN_100019f0` is the display-write boundary. It does not inspect or
+transform payload contents: it only copies bytes, prefixes the report-ID byte
+already present in its allocated report buffer, and invokes `WriteFile`.
+`CAL_USB_WRITE` likewise does not decode weather fields or determine whether
+the device accepted or rendered the data. No display update routine exists in
+this DLL. The weather serializer and any device-side display interpretation
+must therefore be in `usbwr.exe` or firmware; `onlywell.dll` cannot resolve
+the remaining display-acceptance assumption.
+
+### Headless decompilation of the native weather sender in `usbwr.exe` (2026-10-10)
+
+The installed `usbwr.exe` was imported and analyzed with the same headless
+Ghidra workflow. Its startup path at `0x00401400` loads `onlywell.dll` and
+resolves `CAL_USB_WRITE`, `CAL_USB_READ`, and `DeviceIni` with
+`GetProcAddress`. It calls `DeviceIni`, performs readback through
+`CAL_USB_READ`, and retains the `CAL_USB_WRITE` function pointer for the
+weather update loop.
+
+The static update path is:
+
+```text
+FUN_00412fb0(weather_values)
+  -> parse weather.dat named records and derive current/daily values
+FUN_00401400
+  -> initialize selector/header cells
+  -> FUN_0040d340(..., bit_count, ...)
+       MSB-first variable-width bit copy into the native buffer
+  -> FUN_0040bc70(..., 0x40)
+       finalize/copy a 64-bit chunk
+  -> CAL_USB_WRITE(...)
+       write each 16-byte chunk, with a 2 ms inter-chunk delay
+```
+
+The decompiler recovered these relevant behaviors:
+
+- `FUN_00412fb0` reads named records beginning with `TEMPH`, computes the
+  current value and up to six daily values, and stores the results for the
+  sender.
+- `FUN_0040d340` copies source bits MSB-first, advances the destination nibble
+  cursor, and supports the native variable field widths.
+- The sender initializes buffers with `0x10` nibble cells, sets selector/header
+  cells, packs fields, computes the number of 16-byte writes from the bit
+  length, and invokes the resolved `CAL_USB_WRITE` pointer for every chunk.
+- The same loop appears in the selector-specific branches, including the
+  128-bit primary segment and the 64-bit secondary segment. The native code
+  sleeps 2 ms between chunks.
+
+This proves that the original application does construct and transmit native
+weather-update buffers through the same HID transport implemented by the
+replacement. It does **not** prove LCD rendering: `usbwr.exe` does not receive
+an explicit display-success result, and the device-side interpretation is not
+present in either executable. The live tests therefore establish transport
+delivery and transient device responses, but physical display acceptance still
+requires a visible device update or firmware-level evidence.
+
+### LCD mechanics search (2026-10-10)
+
+Additional inspection of all installed Weather-Life binaries found no
+controller-specific LCD instructions or data tables. Searches for LCD,
+segment, character, matrix, framebuffer, and screen operations found only UI
+resources and generic HID/Win32 I/O symbols. The decompiled call graph also
+contains no character-rendering loop or display-success parser. The proven
+LCD-facing contract therefore stops at:
+
+```text
+native weather bits -> 16-byte CAL_USB_WRITE payload chunks -> Tenx HID
+```
+
+The LCD's character/segment mapping and firmware acceptance behavior are not
+contained in the available executables. The C implementation preserves this
+boundary: it implements the proven native chunk sender with the original
+approximately 2 ms inter-chunk delay in the selector-6 experiment, but
+continues to refuse general weather transmission until an LCD update is
+observed or the firmware protocol is recovered.
+
+The user reports that the connected hardware visibly shows sun/weather
+symbols, segmented date/time, and a fixed view of approximately five forecast
+days. This confirms the physical presentation is richer than a plain 16x2
+character display, but does not identify the wire selector for each visible
+slot. It also does not reconcile the visible five-day view with the native
+parser's statically present Day1--Day6 selector families; the extra source day
+may be rotated, unused, or a separate internal record.
+
+The user further reports that a tray-icon action appeared to send current
+conditions plus five forecast days over USB/HID. This matches the recovered
+process split in which `weather.exe` initiates the refresh and `usbwr.exe`
+parses the resulting records and emits multiple selector writes. The report
+is retained as runtime evidence, not as a decoded packet capture: the
+decompiled parser has capacity for one current value plus up to six daily
+values, while the visible five-day presentation does not identify which
+selector family is omitted or rotated.
+
+### Additional binary coverage (2026-10-10)
+
+The installed `usbwr.dll` was independently imported and analyzed. Its sole
+export is `usbdeviceread` at `0x1000100f`. The decompiled helpers confirm the
+registration mechanics implemented in `src/device_registration.c`:
+
+- `FUN_10001650` forms the five-character ASCII identifier from the low
+  millisecond nibble and a zero-padded hexadecimal `rand()` value.
+- `FUN_10001830` normalizes each response cell with `cell & 0x0f`.
+- `FUN_100018b0` reconstructs logical bytes from adjacent nibble cells,
+  applies the embedded 256-entry CRC table, and writes the checksum as two
+  `0x10 | nibble` cells.
+- `usbdeviceread` waits for a response whose normalized first cell is zero,
+  second cell is nine, and next ten cells echo the generated identifier.
+  Otherwise it builds the registration payload, sends it in 16-cell chunks,
+  and retries reads.
+
+This independently confirms the registration behavior implemented in
+`src/device_registration.c` and `python/dongle_protocol.py`.
+
+The installed `weather.exe` imports as a Delphi-packed PE. Ghidra's headless
+function recovery identifies only an entry stub and reports invalid control
+flow when decompiling it. Its UI strings confirm city selection, refresh, and
+update forms, but this binary did not yield a reliable weather-to-USB call
+graph. The reliable sender remains `usbwr.exe`; no code was changed based on
+the unusable `weather.exe` entry decompilation.
+
 # Reverse Engineering Report: Weather-Life Dongle
 
 **Date**: 2026-09-18
@@ -793,6 +939,33 @@ up to seven blocks. The constants are visible at `0x004478c0`
 `0x004478d4` (`TEMP`), and `0x00447330` (`WS`). This proves the parser record
 mapping, independent of archive record order.
 
+### Current-Condition Sender Contract Still Open
+
+Further bytecode tracing narrows, but does not close, the normal current-send
+path. `FUN_004105e0` copies the substring after the first semicolon from its
+input line and terminates it at the next semicolon or carriage return. The
+five header selectors `0..4` serialize overlapping ten-byte windows from
+this 40-byte table; selector 0 prepends a separately converted byte. The
+table's producer is record text, not a direct serialization of `WeatherData`,
+and its byte semantics have not been mapped to the archived current fields.
+
+`FUN_00412e60`, called by `FUN_00412fb0`, computes a piecewise
+temperature-like float from five parsed current inputs and a validity flag.
+When the flag is set it returns the native sentinel global; otherwise it
+applies a formula using binary constants and branches on the first input.
+This is more than a direct copy of current temperature, humidity, and wind
+speed. The public `WeatherData` contract lacks the full five-input record set,
+and `weather_parse_legacy_current` intentionally does not map `BTEMP`, `WEA`,
+`TREND`, `BFT`, `WW`, `VIS`, `UVI`, or `DEWP` into native current-wire values.
+
+Therefore the current-only `usb_send_weather_data` refusal is intentional:
+neither mutating archived records and fuzzing a replacement encoder nor
+reusing forecast selector layouts proves the device's current-condition wire
+mapping. Removing the refusal requires an original `CAL_USB_WRITE` capture
+for the current path, correlated against controlled one-field source changes,
+including the header windows. No current-condition differential capture is
+available yet.
+
 The 40-bit prefix's semantic meaning and a few selector-6 value conversions
 remain open. The selector-6 field positions and widths are resolved below
 from the stream skip, ordered fixture, append calls, and checksum boundary;
@@ -844,18 +1017,18 @@ index 4 corresponds to logical bit 40.
 
 | Slot | Day-1 record | Start bit | Bits | Native conversion/append behavior |
 | ---: | --- | ---: | ---: | --- |
-| 0 | `TEMPH` | 40 | 9 | Rounded signed-temperature encoder |
-| 1 | `TEMPL` | 49 | 9 | Float-to-integer conversion, then shared temperature encoder |
-| 2 | `MORING_ICON` | 58 | 7 | Index in 79-entry icon-name table; unknown maps to 79 |
-| 3 | `WS` | 65 | 11 | Decimal suffix is discarded; integer is packed in 11 bits |
-| 4 | `WBFT` | 76 | 2 | Numeric value, low 2 bits |
-| 5 | `WW` | 78 | 8 | Numeric/sentinel conversion |
+| 0 | `TEMPH` | 40 | 9 | Signed decimal integer plus suffix-derived increment; `N...` maps to `0xff`; encoded as 9-bit two's complement |
+| 1 | `TEMPL` | 49 | 9 | Provider-derived float truncated toward zero by `__ftol`, then encoded by the `TEMPH` path |
+| 2 | `MORING_ICON` | 58 | 7 | Matching index in either of two 79-name tables; unknown maps to 79 |
+| 3 | `WS` | 65 | 11 | Text after `.` is discarded; signed integer is packed modulo 11 bits |
+| 4 | `WBFT` | 76 | 2 | Signed integer, or leading `-`/`N/A` as `0xff`; low 2 bits are packed |
+| 5 | `WW` | 78 | 8 | Text after `.` is discarded; signed integer is packed modulo 8 bits; no missing-value sentinel |
 | 6 | `HUM` | 86 | 0 | Record consumed, no bits appended |
-| 7 | `AFTERNOON_N` | 86 | 5 | Result from unresolved helper `func_0x0040105a` |
-| 8 | `AFWS` | 91 | 7 | Numeric value, 7-bit append |
-| 9 | `AFBFT` | 98 | 8 | Decimal/digit conversion, 8-bit append |
-| 10 | `AFWW` | 106 | 5 | Numeric/sentinel conversion |
-| 11 | `AFHUM` | 111 | 8 | Signed value with high-bit sign flag; positive values clamp to 127 |
+| 7 | `AFTERNOON_N` | 86 | 5 | Compass alias index `0..7`; unknown maps to 8 |
+| 8 | `AFWS` | 91 | 7 | Signed integer, or leading `-`/`N/A` as `0xff`; low 7 bits are packed |
+| 9 | `AFBFT` | 98 | 8 | `integer_part * 10 + parsed_suffix`, upper-clamped to 254 |
+| 10 | `AFWW` | 106 | 5 | Signed integer, or leading `-`/`N/A` as `0xff`; low 5 bits are packed |
+| 11 | `AFHUM` | 111 | 8 | Rounded signed magnitude: sign flag in bit 7, positive magnitude capped at 127 |
 
 The fields occupy logical bits 40..118 (79 bits). Logical bit 119 is padding,
 and logical byte 15 is the checksum. `FUN_0040bc70(buffer, ..., 0x80)`
@@ -866,16 +1039,219 @@ copies 16 cells per call, so this segment is sent in two writes at buffer
 offsets 0 and 16. The separate `0x40`-bit path occupies 16 nibble cells and
 uses one write.
 
-The names and positions above are proven for selector 6, but this is a Day-1
-morning/afternoon block, not the current-condition block. The 40-bit prefix,
-the conversion helper for `AFTERNOON_N`, and the other selector families
-remain unresolved. `src/weather_frame.c` remains an offline candidate and the
-live sender remains disabled.
+The first ten nibble cells (40 logical bits) are copied from the preceding
+`CAL_USB_READ` result. Selector 6 preserves those cells, ORs `0x07` into cell
+1, resets following cells to the `0x10` nibble-cell marker, then appends the
+Day-1 fields beginning at bit 40. The response dispatcher uses normalized
+nibble cell 1 directly (`local_310._1_1_ & 0x0f`), not a reconstructed logical
+byte, to select response handlers.
 
-**Still open**: full current-condition and forecast coverage across the other
-selector families, meaning of the 40-bit prefix, exact conversion semantics
-for unresolved helpers, and runtime confirmation against a native
-`CAL_USB_WRITE` capture. No guessed data has been sent to the device.
+One response state has a fully proven prefix interpretation. The registration
+acknowledgment check requires normalized cells 0 and 1 to be `0` and `9`, then
+compares cells 2 through 11 against the ten generated registration-ID
+nibbles. If this acknowledgment is the readback that seeds a selector-6
+frame, its copied prefix is cell 0=`0`, cell 1=`0x0f` after the `|= 0x07`
+operation, and cells 2 through 9 equal registration-ID nibbles 0 through 7.
+Those eight ID nibbles plus the two control cells make the 40-bit prefix; ID
+nibbles 8 and 9 are beyond the prefix and are overwritten by the weather
+fields. This mapping is conditional on the readback being that verified
+registration acknowledgment, not a universal meaning for every prefix.
+
+The native C primitives mirror the proven portion of this path:
+`weather_frame_begin_native_selector6` normalizes/copies the ten prefix cells,
+applies the cell-1 OR, and initializes a 32-cell buffer;
+`weather_frame_append_native_selector6_fields` appends the exact 79-bit field
+order from preconverted values; and `weather_frame_finalize_native_selector6`
+adds the zero pad and the 15-byte XOR-of-table checksum. The named one-shot
+test mode sends two 16-cell writes, but the application weather-send path
+remains refused. The builder does not parse source strings or map icon names.
+
+For the separately observed idle response, all normalized cells are zero, so
+the emitted prefix cells are `0, 7, 0, ...` after cell 1 is modified. The
+weather-write-associated response with cell 1=`0x0b` has no explicit
+dispatcher handler; if it seeds selector 6, the emitted cell 1 is proven to
+be `0x0f` after the OR operation. The meanings of its remaining cells, and
+their interpretation when carried into a selector-6 frame, remain unknown.
+
+The original weather path's HID control selector is statically resolved to
+zero; it is distinct from the weather-record dispatcher selector 6. At
+`usbwr.exe:0x4034e1`, the caller initializes its retry byte to numeric `1`
+and passes it as the first argument to the resolved `CAL_USB_READ` pointer.
+Retries increment that byte through numeric `4`. The decompiled export has
+signature `CAL_USB_READ(char selector, int buffer)` and forwards `selector` to
+`FUN_10001ab0`. That helper initializes control-header byte 8 to zero and
+overrides it only when the argument equals ASCII `'0'`, `'1'`, or `'2'`.
+Numeric retry bytes `1..4` match none of those values, so the original path's
+on-wire HID selector is zero, including retries. This resolves which read
+response seeds the prefix; response-state-specific contents are described
+above.
+
+An idle-device read-only capture on 2026-10-09 sent operation `1`, length
+`0x10`, with normalized control selectors `0`, `1`, and `2`. Each feature
+response was report ID `00` followed by sixteen `10` nibble cells. The
+low-nibble-normalized contents were therefore all zero for these reads. This
+matches the selector-0 response used by the original weather path. The
+selector-1 and selector-2 reads were separate comparison probes; they also
+returned the marker-only response. This is a baseline observation, distinct
+from the verified registration-ack state above. No write operation was issued
+during the capture.
+
+### Authorized Selector-6 Hardware Test (2026-10-10)
+
+After the one-shot registration probe matched its generated acknowledgment, a
+separate selector-6 test was built from the subsequent idle readback (sixteen
+`0x10` cells, normalized to zero). Numeric field values came from the archived
+Rotterdam `DAY1` fixture. Because the icon ordinal was not recovered, the
+documented unknown-icon result `79` was used; `AFTERNOON_N` likewise used the
+unknown-direction result `8`. This was an exploratory segment, not an exact
+encoding of every archived string value.
+
+The complete checksummed 32-cell segment was:
+
+```text
+00 07 00 00 00 00 00 00 00 00 10 13 17 1f 12 17
+18 10 19 18 10 11 10 15 10 18 18 10 1a 14 1c 16
+```
+
+An independent calculation gave checksum `0xc6`, stored in cells `1c 16`.
+The replacement sent this as two 16-cell writes, then polled six times at
+100 ms intervals. Every response remained sixteen `0x10` cells; there was no
+response transition or acknowledgment. This does not prove whether the device
+accepted or rendered the frame. No second weather write was sent.
+
+A separate one-shot test used the exact 16-byte payload from the original
+application's captured `CAL_USB_WRITE` report:
+
+```text
+10 14 10 10 10 10 10 10 14 10 10 10 10 12 19 1b
+```
+
+The idle read was sixteen `0x10` cells. The 100 ms post-write read was
+`10 1b 18 10 10 10 10 10 14 10 10 10 10 12 19 1b`; after a later read-only
+poll, the response had returned to sixteen `0x10` cells. The user observed no
+visible display change. This reproduces a transient response beginning with
+normalized cells `0, 0x0b`, but gives no positive evidence of display
+acceptance. The response's protocol meaning and the cause of the unchanged
+display remain unresolved.
+
+Conversion details confirmed from the selector-6 switch and helper bodies:
+
+- The decimal integer helper accepts an optional sign and parses leading
+  digits. `TEMPH` and negative `AFHUM` separately parse the substring after
+  `.` as an integer and increment the magnitude when that parsed value is at
+  least 5. This is conventional rounding for the one-digit suffixes in the
+  fixtures, but multi-digit suffixes are compared as a whole integer.
+- `TEMPH` encodes positive magnitudes directly and negative magnitudes as
+  `0x100 - magnitude`, with the sign bit, yielding a 9-bit two's-complement
+  value. Negative zero is encoded as zero; an input beginning with `N` maps
+  to `0xff`. `TEMPL` converts its provider-side float with `__ftol`, formats
+  that integer, and then follows the same path. The helper sets the x87
+  rounding-control bits to `11` for `FISTP` and restores the prior control
+  word, so conversion truncates toward zero.
+- The 79-icon lookup searches two parallel name tables and returns the
+  matched position, independent of which table matched. No match returns 79.
+- `AFTERNOON_N` returns the position in one of two eight-entry direction
+  alias tables. Their orders are `N, WN, W, SW, S, OS, O, NO` and
+  `N, NW, W, WS, S, SO, O, ON`; no match returns 8. The aliases share
+  ordinal positions, progressing around the compass from north through west,
+  south, and east.
+- `WS` and `WW` discard the decimal point and everything following it before
+  integer parsing. The bit appender takes the requested low bits; neither
+  field clamps the parsed value. `WBFT`, `AFWS`, and `AFWW` explicitly map
+  any input beginning with `-`, and `N/A`, to `0xff` before taking 2, 7, and
+  5 bits respectively. Thus negative numerics in those fields use the
+  all-ones marker rather than signed numeric encoding.
+- `AFBFT` parses the integer part and the substring after `.` separately,
+  computes `integer_part * 10 + suffix`, and caps values above 254 at 254.
+  `AFHUM` uses the temperature-style suffix increment; negative values set
+  bit 7 and retain the low seven magnitude bits, while positive values cap at
+  127. It has no explicit `N/A` mapping.
+
+### Later-Day Forecast Selector Families (2026-10-10)
+
+The initialized selector tables and nested switch prove the later-day mapping:
+`local_638` assigns group skips 1 through 7 to selector pairs `6/7` through
+`18/19`. For pairs from `8/9` onward, `local_6a8` assigns record skips `1`
+and `14`. `FUN_0040d850` skips blank-separated groups; `FUN_0040dad0` skips
+individual lines. Against the archived fixture, an even selector skips the
+`DAYn` header and starts at `TEMPH`; its paired odd selector skips that header
+plus the first 13 records and starts at `NWS`.
+
+| Day | First-part selector | Second-part selector | Group skip | Record skip |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 8 | 9 | 2 | 1 / 14 |
+| 3 | 10 | 11 | 3 | 1 / 14 |
+| 4 | 12 | 13 | 4 | 1 / 14 |
+| 5 | 14 | 15 | 5 | 1 / 14 |
+| 6 | 16 | 17 | 6 | 1 / 14 |
+| 7 | 18 | 19 | 7 | 1 / 14 |
+
+Selectors `8, 10, 12, 14, 16, 18` share one 13-slot encoder. The archived
+record order aligns those slots through `NIGHT_ICON`; the initialized native
+widths and special cases are:
+
+| Slot | Record | Bits | Conversion |
+| ---: | --- | ---: | --- |
+| 0 | `TEMPH` | 9 | Rounded signed temperature |
+| 1 | `TEMPL` | 9 | Provider float truncated toward zero, then the temperature encoder |
+| 2 | `MORING_ICON` | 7 | 79-name icon index; unknown is 79 |
+| 3 | `WS` | 8 | Parsed integer |
+| 4 | `WBFT` | 0 | Consumed, not appended |
+| 5 | `WW` | 5 | Direction alias index; unknown is 8 |
+| 6 | `HUM` | 7 | Numeric/sentinel conversion |
+| 7 | `AFTERNOON_N` | 7 | 79-name icon index; unknown is 79 |
+| 8 | `AFWS` | 8 | Numeric/sentinel conversion |
+| 9 | `AFBFT` | 0 | Consumed, not appended |
+| 10 | `AFWW` | 5 | Direction alias index; unknown is 8 |
+| 11 | `AFHUM` | 7 | Numeric/sentinel conversion |
+| 12 | `NIGHT_ICON` | 7 | 79-name icon index; unknown is 79 |
+
+The first-part widths total 79 bits, so they occupy logical bits 40..118;
+bit 119 is zero padding, followed by the checksum byte at bits 120..127.
+Selectors `9, 11, 13, 15, 17, 19` share an 11-record encoder starting at
+`NWS`:
+
+| Record(s) | Bits | Conversion |
+| --- | ---: | --- |
+| `NWS` | 8 | Parsed integer |
+| `NBFT` | 0 | Consumed, not appended |
+| `NWW` | 5 | Direction alias index; unknown is 8 |
+| `NHUM` | 7 | Numeric/sentinel conversion |
+| `SUNR` | 11 | Hour (5) and minute (6), parsed as separate components |
+| `SUNS` | 11 | Hour (5) and minute (6), parsed as separate components |
+| `PPCP` | 7 | Parsed integer |
+| `RAINMS` | 8 | Rounded numeric suffix conversion |
+| `SUNTIME` | 5 | Parsed integer |
+| `UVI` | 5 | Parsed integer |
+| `DEWP` | 8 | Numeric/sentinel conversion |
+
+The second-part widths total 75 bits, occupying logical bits 40..114; bits
+115..119 are zero padding and bits 120..127 hold the checksum. Both parts use
+the same 40-bit readback prefix and the same 128-bit finalizer. The native C
+builders `weather_frame_build_native_later_day_first` and
+`weather_frame_build_native_later_day_second` encode these two proven layouts
+from preconverted values. A Day2 golden vector is covered by native tests.
+
+This establishes the archived and parsed forecast range **Day1 through
+Day6**. `FUN_00412fb0` produces one current value plus at most six daily
+values, and the archive format and C parser recognize `DAY1` through `DAY6`.
+Selectors `18/19` follow the same bytecode family with group skip 7, but there
+is no Day7 record in the archived fixture or parser contract. Their compiled
+branches are not proof that the normal application has Day7 data. Therefore
+the proven days after Day1 are Day2..Day6; a seventh forecast day is not
+established.
+
+This is a Day-1 morning/afternoon block, not the current-condition block.
+The later-day branch layouts are documented below. The current-condition
+group remains unresolved. The normal application sender remains disabled;
+only the explicit selector-6 exploratory one-shot can write.
+
+**Still open**: meanings of response-prefix cells for non-registration states,
+source-text conversion integration and icon-name mapping in the C builder,
+the current-condition group, source data for Day7 despite selectors 18/19,
+and whether the exploratory selector-6 segment was accepted or displayed.
+The replacement emitted the candidate; an original-app `CAL_USB_WRITE`
+capture is still unavailable.
 
 ### Refresh Capture (2026-09-08)
 

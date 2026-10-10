@@ -97,7 +97,9 @@ bool usb_send_weather_data(USBDevice* device, const WeatherData* data)
     (void)device;
     (void)data;
     fprintf(stderr,
-            "Weather transmission refused: native header field semantics and wire offsets remain unproven\n");
+            "Weather transmission refused: the proven native sender uses forecast "
+            "segments, but no LCD renderer or display-acceptance contract exists "
+            "in the decompiled binaries\n");
     return false;
 }
 
