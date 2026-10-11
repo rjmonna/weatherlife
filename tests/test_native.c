@@ -3,6 +3,8 @@
 #include "weather_frame.h"
 #include "weather_icons.h"
 #include "weather_response.h"
+#include "weather_sender.h"
+#include "weather_session.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -122,6 +124,138 @@ static int test_response_parser(void)
 
     ASSERT_TRUE(!weather_parse_legacy_current("TEMP <9> <21>;\n", 16, &data));
     ASSERT_TRUE(!weather_parse_legacy_records("BROKEN\n", 7, &parsed));
+    return 0;
+}
+
+static int test_weather_sender(void)
+{
+    const char response[] =
+        "TEMP <9> <12.0>;\n"
+        "DAY1 20260918;\n"
+        "TEMPH <9> <6.9>;\n"
+        "TEMPL <9> <-3.8>;\n"
+        "MORING_ICON <7> <SO____>;\n"
+        "WS <11> <-2.5>;\n"
+        "WBFT <2> <N/A>;\n"
+        "WW <8> <7.9>;\n"
+        "HUM <0> <0>;\n"
+        "AFTERNOON_N <5> <NW>;\n"
+        "AFWS <7> <N/A>;\n"
+        "AFBFT <8> <3.4>;\n"
+        "AFWW <5> <-1>;\n"
+        "AFHUM <8> <-2.6>;\n"
+        "DAY2 20260919;\n"
+        "TEMPH <9> <20.4>;\n"
+        "TEMPL <9> <10.8>;\n"
+        "MORING_ICON <7> <MO____>;\n"
+        "WS <8> <6>;\n"
+        "WBFT <0> <0>;\n"
+        "WW <5> <NW>;\n"
+        "HUM <7> <N/A>;\n"
+        "AFTERNOON_N <7> <SO____>;\n"
+        "AFWS <8> <N/A>;\n"
+        "AFBFT <0> <0>;\n"
+        "AFWW <5> <WN>;\n"
+        "AFHUM <7> <45>;\n"
+        "NIGHT_ICON <7> <MBGR2_>;\n"
+        "NWS <8> <3.9>;\n"
+        "NBFT <0> <0>;\n"
+        "NWW <5> <ON>;\n"
+        "NHUM <7> <N/A>;\n"
+        "SUNR <11> <06:30>;\n"
+        "SUNS <11> <20:15>;\n"
+        "PPCP <7> <40>;\n"
+        "RAINMS <8> <2.5>;\n"
+        "SUNTIME <5> <5>;\n"
+        "UVI <5> <4>;\n"
+        "DEWP <8> <N/A>;\n";
+    WeatherLegacyResponse parsed;
+    uint8_t prefix[WEATHER_FRAME_SIZE];
+    uint8_t actual[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
+    uint8_t expected[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
+    WeatherFrameNativeSelector6Fields selector6 = {
+        .temperature_high = 7,
+        .temperature_low = (uint16_t)-3 & 0x1ff,
+        .morning_icon_index = 0,
+        .wind_speed = (uint16_t)-2 & 0x7ff,
+        .beaufort = 3,
+        .weather_word = 7,
+        .afternoon_direction_index = 1,
+        .afternoon_wind_speed = 0x7f,
+        .afternoon_beaufort = 34,
+        .afternoon_weather_word = 0x1f,
+        .afternoon_humidity = 0x83
+    };
+    WeatherFrameNativeLaterDayFirstFields day2_first = {
+        .temperature_high = 20,
+        .temperature_low = 10,
+        .morning_icon_index = 0,
+        .wind_speed = 6,
+        .weather_direction_index = 1,
+        .humidity = 0x7f,
+        .afternoon_icon_index = 0,
+        .afternoon_wind_speed = 0xff,
+        .afternoon_direction_index = 1,
+        .afternoon_humidity = 45,
+        .night_icon_index = 78
+    };
+    WeatherFrameNativeLaterDaySecondFields day2_second = {
+        .night_wind_speed = 3,
+        .night_direction_index = 7,
+        .night_humidity = 0x7f,
+        .sunrise_hour = 6,
+        .sunrise_minute = 30,
+        .sunset_hour = 20,
+        .sunset_minute = 15,
+        .precipitation_percent = 40,
+        .rainfall = 3,
+        .sunshine_hours = 5,
+        .uv_index = 4,
+        .dew_point = 0xff
+    };
+
+    memset(prefix, 0x10, sizeof(prefix));
+    ASSERT_TRUE(weather_parse_legacy_records(response, strlen(response), &parsed));
+
+    ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+        6, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_TRUE(weather_frame_build_native_selector6(
+        prefix, sizeof(prefix), &selector6, expected));
+    ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
+
+    ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+        8, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_TRUE(weather_frame_build_native_later_day_first(
+        prefix, sizeof(prefix), &day2_first, expected));
+    ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
+
+    ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+        9, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_TRUE(weather_frame_build_native_later_day_second(
+        prefix, sizeof(prefix), &day2_second, expected));
+    ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
+
+    ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+               weather_sender_build_weather_segment(
+                   1, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+               weather_sender_build_weather_segment(
+                   7, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+               weather_sender_build_weather_segment(
+                   18, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_INT(WEATHER_SENDER_MISSING_DAY,
+               weather_sender_build_weather_segment(
+                   10, &parsed, prefix, sizeof(prefix), actual));
+
+    memcpy(parsed.days[0].records[0].value, "<bad>", sizeof("<bad>"));
+    ASSERT_INT(WEATHER_SENDER_INVALID_VALUE,
+               weather_sender_build_weather_segment(
+                   6, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_INT(WEATHER_SENDER_INVALID_VALUE,
+               weather_sender_build_weather_segment(
+                   6, &parsed, prefix,
+                   WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS - 1, actual));
     return 0;
 }
 
@@ -329,6 +463,91 @@ static int test_selector6_prefix(void)
     return 0;
 }
 
+static uint8_t reference_checksum_table_value(uint8_t value)
+{
+    for (int bit = 0; bit < 8; bit++) {
+        value = (value & 0x80)
+                    ? (uint8_t)((value << 1) ^ 0x31)
+                    : (uint8_t)(value << 1);
+    }
+    return value;
+}
+
+static int test_native_segment_checksum(const uint8_t* cells, size_t segment_bits)
+{
+    uint8_t checksum = 0;
+    size_t logical_bytes = (segment_bits - 8) / 8;
+    size_t checksum_cell = (segment_bits - 8) / 4;
+
+    for (size_t i = 0; i < logical_bytes; i++) {
+        uint8_t value =
+            (uint8_t)(((cells[i * 2] & 0x0f) << 4) |
+                      (cells[i * 2 + 1] & 0x0f));
+        checksum ^= reference_checksum_table_value(value);
+    }
+    return cells[checksum_cell] == (uint8_t)(0x10 | (checksum >> 4)) &&
+           cells[checksum_cell + 1] ==
+               (uint8_t)(0x10 | (checksum & 0x0f));
+}
+
+static int test_weather_session(void)
+{
+    uint8_t init_frame[WEATHER_FRAME_SIZE];
+    uint8_t response[WEATHER_SESSION_CONTROL_CELLS];
+    uint8_t control_frame[WEATHER_SESSION_CONTROL_CELLS];
+    WeatherSessionControlFields fields = {
+        .mode_flags = 5,
+        .field_a = 10,
+        .field_b = 5,
+        .field_c = 3,
+        .field_d = 2,
+        .session_flag = true
+    };
+    WeatherSessionState state;
+
+    ASSERT_TRUE(weather_session_build_init_frame(0xa5, true, init_frame));
+    ASSERT_INT(0x10, init_frame[0]);
+    ASSERT_INT(0x1a, init_frame[1]);
+    ASSERT_INT(0x1a, init_frame[2]);
+    ASSERT_INT(0x15, init_frame[3]);
+    ASSERT_INT(0x18, init_frame[4]);
+    ASSERT_TRUE(test_native_segment_checksum(init_frame, 64));
+    ASSERT_TRUE(!weather_frame_finalize_native_segment(init_frame,
+                                                        sizeof(init_frame), 80));
+
+    memset(response, 0x10, sizeof(response));
+    response[1] = 0x19;
+    ASSERT_TRUE(weather_session_build_control_frame(
+        response, sizeof(response), &fields, control_frame));
+    ASSERT_INT(0x0d, control_frame[1]);
+    ASSERT_INT(0x01, control_frame[7]);
+    ASSERT_INT(0x16, control_frame[8]);
+    ASSERT_INT(0x1a, control_frame[9]);
+    ASSERT_INT(0x1b, control_frame[10]);
+    ASSERT_INT(0x1a, control_frame[11]);
+    ASSERT_TRUE(test_native_segment_checksum(control_frame, 64));
+    ASSERT_TRUE(!weather_session_build_control_frame(
+        response, WEATHER_SESSION_CONTROL_PREFIX_CELLS - 1, &fields,
+        control_frame));
+
+    weather_session_state_init(&state);
+    ASSERT_INT(WEATHER_SESSION_RETRY_READ,
+               weather_session_on_read(&state, false));
+    ASSERT_INT(WEATHER_SESSION_RETRY_READ,
+               weather_session_on_read(&state, false));
+    ASSERT_INT(WEATHER_SESSION_RETRY_READ,
+               weather_session_on_read(&state, false));
+    ASSERT_INT(WEATHER_SESSION_RECOVER_DEVICE,
+               weather_session_on_read(&state, false));
+    ASSERT_INT(WEATHER_SESSION_SEND_INIT_FRAME,
+               weather_session_on_read(&state, true));
+    ASSERT_INT(WEATHER_SESSION_PROCESS_RESPONSE,
+               weather_session_on_read(&state, true));
+    ASSERT_INT(WEATHER_SESSION_INVALID_STATE,
+               weather_session_on_read(NULL, true));
+    return 0;
+}
+
 static int test_icons(void)
 {
     ASSERT_INT(0, weather_icon_index("SO____"));
@@ -346,8 +565,10 @@ int main(void)
     ASSERT_INT(0, test_bit_packer());
     ASSERT_INT(0, test_registration());
     ASSERT_INT(0, test_response_parser());
+    ASSERT_INT(0, test_weather_sender());
     ASSERT_INT(0, test_weather_frame());
     ASSERT_INT(0, test_selector6_prefix());
+    ASSERT_INT(0, test_weather_session());
     ASSERT_INT(0, test_icons());
     puts("native unit tests passed");
     return 0;

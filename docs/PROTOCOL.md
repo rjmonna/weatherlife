@@ -135,14 +135,19 @@ The passive traces contain these facts only:
    write-associated response state, but does not identify its status meaning.
 - Decompilation of the `usbwr.exe` dispatcher (call at `0x00403dc8`, switch at
   `0x00404f9a`) shows the exchange is device-polled: the low nibble of response
-  cell 1 is the selector the dongle requests (1 current-condition handler at
+  cell 1 is the selector the dongle requests (1 city/registration handler at
   `0x004053f4`, 6 Day-1 at `0x00405f3b`, 8 later days at `0x00404fc2`; others
-  have no handler). The idle all-`0x10` and the transient `0, 0x0b` response
-  trigger no send. `weather-life-discover --listen-and-answer N` polls, logs
-  response changes and answers only selector 6; a 30 s idle listen saw no
-  request. What makes the dongle request a selector is still unknown, and
-  repeated selector-6 writes and the captured payload (transient `0, 0x0b`)
-  produced no visible display change.
+  include selector families 8..19). The idle all-`0x10` and the transient
+  `0, 0x0b` response trigger no send. The opt-in
+  `weather-life-discover --serve-weather <legacy-weather-file> <seconds>` loop
+  now uses parsed legacy named records to answer selector 6 and selectors
+  8..17. It leaves selector 1, selector 7, current selectors, and selectors
+  18/19 unanswered because their data/layout is unresolved or unavailable.
+  The loop does not perform device registration or startup initialization and
+  stops after four consecutive read failures rather than reconnecting with an
+  unknown initialization value. What makes the dongle request a selector is
+  still unknown, and previous exploratory writes produced no visible display
+  change.
 - On 2026-10-10, one exact 16-byte weather payload captured from the original
    application's `CAL_USB_WRITE` path was sent from an idle baseline. The first
    read after the write returned `10 1b 18 10 10 10 10 10 14 10 10 10 10 12

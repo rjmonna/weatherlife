@@ -8,6 +8,9 @@
 #include "usb_device.h"
 #include "device_registration.h"
 #include "weather_frame.h"
+#include "weather_sender.h"
+#include "weather_session.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +20,6 @@
     #include <windows.h>
     #define SLEEP(ms) Sleep(ms)
 #else
-    #include <errno.h>
     #include <time.h>
     static void sleep_ms(unsigned int milliseconds)
     {
@@ -149,45 +151,141 @@ static bool run_selector6_fixture_test_once(USBBackend* backend,
     return true;
 }
 
-// Mirrors the usbwr.exe dispatcher: the device requests a segment through
-// the low nibble of response cell 1 (handlers exist for 1, 6 and 8). Only
-// selector 6 has a proven layout, so others are logged and left unanswered.
+static const char* weather_sender_result_text(WeatherSenderResult result)
+{
+    switch (result) {
+    case WEATHER_SENDER_OK:
+        return "ok";
+    case WEATHER_SENDER_UNSUPPORTED_SELECTOR:
+        return "unsupported selector";
+    case WEATHER_SENDER_MISSING_DAY:
+        return "forecast day is absent";
+    case WEATHER_SENDER_MISSING_RECORD:
+        return "required named record is absent";
+    case WEATHER_SENDER_INVALID_VALUE:
+        return "record value or readback prefix is invalid";
+    }
+    return "invalid sender result";
+}
+
+static bool read_weather_file(const char* path, WeatherLegacyResponse* weather)
+{
+    FILE* file = NULL;
+    long file_size;
+    char* contents = NULL;
+    bool parsed = false;
+
+    file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "[-] Could not open weather response file: %s\n", path);
+        return false;
+    }
+    if (fseek(file, 0, SEEK_END) != 0 ||
+        (file_size = ftell(file)) <= 0 || file_size > 1024 * 1024 ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "[-] Weather response file is empty, too large, or unreadable\n");
+        fclose(file);
+        return false;
+    }
+    contents = (char*)malloc((size_t)file_size);
+    if (!contents) {
+        fprintf(stderr, "[-] Could not allocate weather response buffer\n");
+        fclose(file);
+        return false;
+    }
+    if (fread(contents, 1, (size_t)file_size, file) != (size_t)file_size) {
+        fprintf(stderr, "[-] Could not read complete weather response file\n");
+    } else if (!weather_parse_legacy_records(contents, (size_t)file_size, weather)) {
+        fprintf(stderr, "[-] Weather file does not match the parsed legacy named-record format\n");
+    } else {
+        parsed = true;
+    }
+    free(contents);
+    fclose(file);
+    return parsed;
+}
+
+static bool parse_positive_seconds(const char* text, int* seconds)
+{
+    char* end;
+    long value;
+
+    if (!text || !seconds) return false;
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (end == text || *end != '\0' || errno == ERANGE ||
+        value <= 0 || value > 86400) {
+        return false;
+    }
+    *seconds = (int)value;
+    return true;
+}
+
+// Respond only to supported forecast requests. Initialization and the
+// selector-1 city exchange remain gated because their complete source data
+// and response contract are not yet decoded.
 static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
+                                  const WeatherLegacyResponse* weather,
                                   int seconds)
 {
-    uint8_t last[WEATHER_FRAME_SIZE];
+    int last_length = 0;
+    uint8_t last[WEATHER_FRAME_SIZE] = {0};
     bool have_last = false;
-    WeatherFrameNativeSelector6Fields fields = selector6_fixture_test_fields();
+    WeatherSessionState session;
 
-    for (int tick = 0; tick < seconds * 10; tick++) {
+    weather_session_state_init(&session);
+    for (int tick = 0; tick < seconds * 1000 / WEATHER_SESSION_POLL_INTERVAL_MS; tick++) {
         uint8_t response[WEATHER_FRAME_SIZE];
         int length = 0;
-        if (!backend->read_data(device, response, sizeof(response), &length) ||
-            length < 10) {
-            SLEEP(100);
+        bool read_ok = backend->read_data(device, response, sizeof(response),
+                                          &length);
+        WeatherSessionAction action = weather_session_on_read(&session, read_ok);
+        if (!read_ok) {
+            if (action == WEATHER_SESSION_RECOVER_DEVICE) {
+                fprintf(stderr,
+                        "[-] Read failed four times; stopping instead of reconnecting "
+                        "without the unresolved startup initialization field\n");
+                return false;
+            }
+            SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
             continue;
         }
-        if (!have_last || memcmp(last, response, WEATHER_FRAME_SIZE) != 0) {
-            char label[48];
-            snprintf(label, sizeof(label), "t=%.1fs", tick / 10.0);
-            print_read_response(label, response, length);
-            memcpy(last, response, WEATHER_FRAME_SIZE);
-            have_last = true;
+        if (action != WEATHER_SESSION_PROCESS_RESPONSE ||
+            length < WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS ||
+            length > (int)sizeof(response)) {
+            fprintf(stderr, "[-] Read returned an invalid response length (%d); no write sent\n",
+                    length);
+            return false;
         }
         unsigned selector = response[1] & 0x0f;
-        if (selector == 6) {
-            uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
-            if (weather_frame_build_native_selector6(response, (size_t)length,
-                                                      &fields, frame) &&
-                write_native_segment(backend, device, frame,
-                                     WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
-                printf("Answered selector-6 request at t=%.1fs\n", tick / 10.0);
-            }
-        } else if (selector == 1 || selector == 8) {
-            printf("Device requested selector %u at t=%.1fs (layout unproven; not answered)\n",
-                   selector, tick / 10.0);
+        bool changed = !have_last || length != last_length ||
+                       memcmp(last, response, (size_t)length) != 0;
+        if (changed) {
+            printf("Device requested selector %u\n", selector);
+            memcpy(last, response, (size_t)length);
+            last_length = length;
+            have_last = true;
         }
-        SLEEP(100);
+        uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
+        WeatherSenderResult result = weather_sender_build_weather_segment(
+            selector, weather, response, (size_t)length, frame);
+        if (result == WEATHER_SENDER_UNSUPPORTED_SELECTOR) {
+            if (changed) {
+                printf("Selector %u is not enabled; no response sent\n", selector);
+            }
+        } else if (result != WEATHER_SENDER_OK) {
+            fprintf(stderr, "[-] Selector %u not answered: %s\n", selector,
+                    weather_sender_result_text(result));
+            return false;
+        } else if (!write_native_segment(
+                       backend, device, frame,
+                       WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
+            return false;
+        } else {
+            printf("Answered selector %u with a checksummed forecast segment\n",
+                   selector);
+        }
+        SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
     }
     return true;
 }
@@ -385,8 +483,9 @@ static bool run_fuzz_writes(USBBackend* backend, USBDevice* device, int rounds)
 
 int main(int argc, char* argv[])
 {
-    int listen_seconds = (argc > 2 && strcmp(argv[1], "--listen-and-answer") == 0)
-        ? atoi(argv[2]) : 0;
+    bool listen_mode = argc > 1 && strcmp(argv[1], "--serve-weather") == 0;
+    int listen_seconds = 0;
+    WeatherLegacyResponse weather;
     bool replay_observed_frame = argc > 1 &&
                                  strcmp(argv[1], "--replay-observed-frame") == 0;
     bool read_once = argc > 1 && strcmp(argv[1], "--read-once") == 0;
@@ -402,6 +501,16 @@ int main(int argc, char* argv[])
                                     strcmp(argv[1], "--print-registration-frame") == 0;
     bool print_weather_frame = argc > 1 &&
                               strcmp(argv[1], "--print-weather-frame") == 0;
+
+    if (listen_mode) {
+        if (argc != 4 || !parse_positive_seconds(argv[3], &listen_seconds)) {
+            fprintf(stderr,
+                    "Usage: %s --serve-weather <legacy-weather-file> <seconds>\n",
+                    argv[0]);
+            return 2;
+        }
+        if (!read_weather_file(argv[2], &weather)) return 1;
+    }
 
     if (print_selector6_fixture_test) {
         uint8_t readback[WEATHER_FRAME_SIZE];
@@ -530,7 +639,8 @@ int main(int argc, char* argv[])
     }
 
     if (listen_seconds > 0) {
-        bool ok = run_listen_and_answer(backend, &device, listen_seconds);
+        bool ok = run_listen_and_answer(backend, &device, &weather,
+                                        listen_seconds);
         usb_close(&device);
         backend->free_device_list(devices);
         return ok ? 0 : 1;

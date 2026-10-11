@@ -1063,8 +1063,24 @@ applies the cell-1 OR, and initializes a 32-cell buffer;
 `weather_frame_append_native_selector6_fields` appends the exact 79-bit field
 order from preconverted values; and `weather_frame_finalize_native_selector6`
 adds the zero pad and the 15-byte XOR-of-table checksum. The named one-shot
-test mode sends two 16-cell writes, but the application weather-send path
-remains refused. The builder does not parse source strings or map icon names.
+test mode sends two 16-cell writes. `weather_sender_build_weather_segment`
+now performs the recovered named-record conversions for selector 6 and
+selectors 8..17, including icon/direction lookups, sentinels, decimal handling,
+and the paired later-day blocks. The response parser allows up to 32 records
+per day so it can retain the complete 24-record forecast group.
+
+`weather-life-discover --serve-weather <legacy-weather-file> <seconds>` is an
+explicit opt-in live loop. It polls every 130 ms, answers only those supported
+forecast selectors, sends each 128-bit segment as two 16-cell writes 2 ms
+apart, and stops on a malformed response, missing/invalid requested data,
+partial write, or four consecutive read failures. It does not synthesize
+missing records, log readback payloads, register the device, recreate the
+unresolved startup initialization field, or automatically reconnect. Selector
+1 (city exchange), selector 7 (a distinct eight-record path), current
+selectors 0..5, and selectors 18/19 remain unanswered. The current-condition
+`usb_send_weather_data` API remains refused: a forecast segment is not a
+complete renderer or proof of display acceptance. No physical transmission
+was performed while implementing this source-text path.
 
 For the separately observed idle response, all normalized cells are zero, so
 the emitted prefix cells are `0, 7, 0, ...` after cell 1 is modified. The
@@ -1133,6 +1149,19 @@ visible display change. This reproduces a transient response beginning with
 normalized cells `0, 0x0b`, but gives no positive evidence of display
 acceptance. The response's protocol meaning and the cause of the unchanged
 display remain unresolved.
+
+### Bounded Physical Selector-6 Transmission (2026-10-11)
+
+With explicit authorization, the Linux client reopened the same Tenx VID/PID
+(`0x1130:0x0202`, payload interface `/dev/hidraw2`). A generated 17-byte
+registration-handshake payload received a matching acknowledgment. The client
+then sent the checksummed selector-6 segment shown above as two 16-cell HID
+writes with 2 ms pacing. Six polls at 100 ms intervals each returned sixteen
+`0x10` cells. The HID calls completed, but there was no response-state change
+or device acknowledgment. This confirms delivery to the USB/HID write path
+only; it does **not** prove firmware acceptance or LCD rendering. The available
+camera was not aimed at the display, so no visual observation was made and no
+image was retained. Do not describe this test as a successful display update.
 
 Conversion details confirmed from the selector-6 switch and helper bodies:
 
@@ -1243,15 +1272,16 @@ established.
 
 This is a Day-1 morning/afternoon block, not the current-condition block.
 The later-day branch layouts are documented below. The current-condition
-group remains unresolved. The normal application sender remains disabled;
-only the explicit selector-6 exploratory one-shot can write.
+group remains unresolved. The explicit selector-response loop supports the
+verified forecast layouts only; it does not enable the general
+`usb_send_weather_data` API or prove that the device renders these segments.
 
 **Still open**: meanings of response-prefix cells for non-registration states,
-source-text conversion integration and icon-name mapping in the C builder,
-the current-condition group, source data for Day7 despite selectors 18/19,
-and whether the exploratory selector-6 segment was accepted or displayed.
-The replacement emitted the candidate; an original-app `CAL_USB_WRITE`
-capture is still unavailable.
+the selector-1 city exchange, selector 7's distinct eight-record format, the
+current-condition group, source data for Day7 despite selectors 18/19, startup
+initialization/recovery field extraction, and whether any forecast segment is
+accepted or displayed. An original-app differential capture for the forecast
+selectors is still unavailable.
 
 ### Refresh Capture (2026-09-08)
 
@@ -1503,26 +1533,63 @@ UsbWeatherStation = "C:\Program Files (x86)\Weather\usbwr.exe"
 
 ## Implementation Roadmap
 
-### Phase 3: Core Implementation
-- [x] Compile Windows USB layer
-- [ ] Compile Linux USB layer
-- [ ] Compile macOS USB layer
-- [ ] Test device discovery on each platform
-- [ ] Verify USB communication using confirmed device frames
+Status updated 2026-10-11. “Implemented” means code exists; it does not imply
+that the device accepted or displayed the data. Hardware writes remain
+experimental unless specifically described below.
 
-### Phase 4: Feature Integration
-- [x] Weather API integration (Open-Meteo)
-- [ ] Display formatting
-- [ ] Location configuration
-- [ ] Systemd/LaunchAgent integration
-- [ ] CLI tool creation
+### Phase 3: Core transport and protocol
+- [x] Implement Windows, Linux, and macOS HID backends and shared HID framing.
+- [x] Implement native registration, MSB-first bit-packing, checksumming, icon
+  lookup, and offline builders for the proven selector-6 and later-day layouts.
+- [x] Port the verified startup/recovery init-frame builder, 64-bit segment
+  checksum finalization, periodic control-frame field layout, and bounded
+  read-retry/recovery state transitions as offline native APIs.
+- [x] Add native C and Python unit suites; the current Meson test run passes
+  both suites.
+- [x] Verify Linux HID discovery and a read-only device poll; the observed
+  response contains sixteen `0x10` cells.
+- [x] Cross-compile and run the documented pure-C tests with MinGW and Wine.
+- [ ] Verify native build, discovery, and read-only I/O on Windows and macOS.
+  The Windows HID backend and macOS backend have not been validated end to end.
+- [ ] Integrate the recovered session primitives with the live transport:
+  130 ms polling, 3-second recovery delay, `DeviceIni`, init-frame resend,
+  periodic control scheduling, and request dispatch. Keep this gated until
+  selector handlers use real parsed records instead of fixture values.
+- [ ] Replace the fixture-only listener with the recovered request-driven
+  sender. Cover selector 1 and every supported weather selector, including
+  dynamic record selection, chunk ordering, and timing. Keep any selector
+  unsupported only if its executable behavior cannot be recovered.
 
-### Phase 5: Polish & Release
-- [ ] Comprehensive testing
-- [ ] User documentation
-- [ ] Installation guides
-- [ ] GitHub CI/CD pipeline
-- [ ] Release packages
+### Phase 4: Weather and device integration
+- [x] Implement the Open-Meteo provider and city geocoding in
+  `python/weather_provider.py`.
+- [x] Parse archived named-record city responses and map verified current
+  numeric fields into the native `WeatherData` structure.
+- [x] Keep candidate serialization separate from proven native layouts; the
+  generic weather-frame builder and the selector-6 fixture values are not a
+  production Open-Meteo-to-device conversion.
+- [ ] Recover and port the original executable's conversions from named
+  weather records into wire values, including weather/icon codes, units,
+  rounding, sentinels, city data, and time fields. The source is the installed
+  `usbwr.exe` (and its companion data files); use controlled archived fixtures
+  and original-process traces to validate the recovered transformations.
+- [ ] Connect the provider and parsed values to the recovered complete
+  device-session update. Build golden tests against original executable
+  outputs before using live weather data.
+- [ ] Add persistent location/configuration and a unified refresh CLI. The
+  provider has its own command-line options; the current native executable is
+  a discovery/experiment tool, not an integrated weather application.
+- [ ] Add systemd and macOS LaunchAgent integration if a continuously running
+  application remains in scope.
+
+### Phase 5: Validation and release
+- [x] Add targeted native and Python unit tests.
+- [ ] Add cross-platform build/test coverage and hardware acceptance checks.
+  Transport success must not be reported as LCD acceptance.
+- [ ] Refresh the user-facing README and write accurate installation and
+  operation guides; existing project-level setup instructions are stale.
+- [ ] Add CI for supported build and test targets.
+- [ ] Define and produce installable release packages.
 
 ## Security Considerations
 
@@ -1533,11 +1600,20 @@ UsbWeatherStation = "C:\Program Files (x86)\Weather\usbwr.exe"
 
 ## Limitations & Known Issues
 
-1. **Display Format**: 16x2 LCD format inferred but not confirmed
-2. **Weather Fields**: Data packet structure partially inferred
-3. **Device Variants**: Multiple VID/PID combinations, may need fallback logic
-4. **Original API**: weather-life.com defunct - must use alternative
-5. **Update Rate**: Exact frequency unknown (hourly assumed)
+1. **Host implementation**: The verified init/control frame builders,
+   checksums, and read-retry/recovery transitions are ported offline. Live
+   lifecycle integration, record conversions, and complete request dispatch
+   remain unfinished.
+2. **LCD acceptance**: The executables expose the host-to-HID behavior, not
+   firmware rendering or a display-success response; physical acceptance
+   remains a separate validation item.
+3. **Device scope**: The replacement targets the confirmed Tenx VID/PID
+   `0x1130:0x0202`; other variants are not currently supported.
+4. **Original API**: `weather-life.com` is defunct; Open-Meteo is implemented
+   as the replacement provider.
+5. **Update cadence**: The decompiled host has a 130 ms poll and an
+   approximately 57-minute idle time-sync interval; weather refresh behavior
+   still depends on the original app/session triggers.
 
 ## Tools & Resources
 
@@ -1549,32 +1625,49 @@ UsbWeatherStation = "C:\Program Files (x86)\Weather\usbwr.exe"
 
 ## Next Steps
 
-1. **Map remaining fields**: Assign byte/bit offsets for `TEMP`, `HUM`, `WEA`,
-   `PRE`, and the per-day forecast fields within the 16-byte "today" segment
-   and 8-byte second segment, using the CSV bit-length table as a
-   high-confidence guide and spot-checking a few more fields in
-   `FUN_00401400`'s disassembly the same way `UPD` was verified.
-2. **Correlate Frames**: Use the handle-correlated tracer during a live
-  weather refresh to classify Tenx HID writes and feature reports.
-3. **Connect Display**: Wire `src/bit_packer.c` and the mapped field table
-   into a real weather-frame builder, then convert an Open-Meteo report only
-   after the display frame format and its real target device are both
-   confirmed.
-5. **Cross-Platform Test**: Verify discovery and display updates on Windows,
-   Linux, and macOS.
+1. **Finish executable-derived behavior recovery.** Resolve selector-1
+   responses, dynamic record selection, provider-to-native conversions, and
+   the complete session loop. The init/control frame layouts and bounded
+   retry/recovery transitions now have offline implementations. Use original
+   binaries and controlled captures rather than treating hardware display
+   acceptance as a prerequisite.
+2. **Integrate and verify the host sender offline.** Connect the recovered
+   builders and state transitions to the USB callbacks after real record
+   parsing and selector handling are available. Compare generated 16-cell
+   writes, order, and timing with original-executable captures, and add those
+   captures as fixtures/tests.
+3. **Connect Open-Meteo to the recovered model.** Convert provider values
+   using the proven original rules, then generate the same native records and
+   session writes. Keep candidate encodings isolated until their output
+   matches the original executable.
+4. **Validate physical display behavior separately.** Host-side weather-to-
+   HID bytes are recoverable from the executables and can be validated without
+   a rendering result. Whether the firmware accepts or visibly renders those
+   bytes remains a separate hardware/firmware validation question; do not
+   conflate it with completing the host-side implementation.
+5. **Complete cross-platform and release work.** Exercise native Windows,
+   Linux, and macOS builds and discovery, then refresh setup documentation,
+   CI, and packaging.
 
 ---
 
-**Reverse Engineering Confidence Level**: 85%
-**Protocol Confidence**: 50% (registration handshake fully decoded; the
-weather-payload serializer's structure, total size, bit-packing primitive,
-and one field group (UPD) are confirmed byte-exact via disassembly and the
-CSV bit-length table is proven authoritative; remaining field offsets are
-unlocated)
-**Implementation Status**: Confirmed Tenx HID discovery, the registration
-handshake algorithm (id generation, nibble packing, CRC-8), and an explicit
-refusal to send the unconfirmed byte-oriented weather packet are implemented
-in `src/`. The native weather-field encoder remains experimental.
+**Protocol confidence**: Transport framing, registration handshake, native
+weather segment boundaries, bit-packing, checksums, and the selector-6 and
+later-day field layouts and conversions for selectors 6 and 8..17 are
+statically verified and implemented. The current-condition sender, selector 1
+and 7 paths, startup control-data extraction, and device-side
+LCD acceptance/rendering remain unresolved. LCD acceptance is a separate
+unproven question and does not block reconstructing the host-side forecast
+response byte stream.
+
+**Implementation status**: Cross-platform HID backends, read-only discovery,
+verified protocol primitives, offline native segment builders, selector
+record-to-frame conversions, an opt-in forecast selector responder, and an
+Open-Meteo provider exist. The general `usb_send_weather_data()` API
+deliberately refuses transmission because it accepts only current
+`WeatherData`, not the full selector-driven native forecast response. Do not
+treat a successful HID write or transient response as proof that the display
+changed.
 
 ### Icon Tables and Selector-1 Handler (2026-10-10)
 
@@ -1631,23 +1724,32 @@ Original session order after registration:
 1. **Init frame** (sent once after start and after every failed
    `CAL_USB_READ` -> `Sleep(3000)` -> `DeviceIni` recovery). A 100-byte buffer
    is filled with `0x10`; `byte[1] |= 0x0A`; cursor starts at byte 2, bit 4.
-   `FUN_0040d340` packs 8 bits from a device.dat-derived byte (`local_430+3`)
-   and 1 flag bit (`local_71c`, initially 1); declared length `0x40` bits;
+   `FUN_0040d340` packs 8 bits from the reg.dat-derived nibble data
+   (`local_430+3`, starting at source bit 4) and 1 session-flag bit
+   (`local_71c`, initially 1); declared length `0x40` bits;
    `FUN_0040bc70` finalizes (checksum/nibble pack); one `CAL_USB_WRITE`.
 2. **Poll**: `Sleep(0x82)` (130 ms), `CAL_USB_READ`, up to 4 retries.
    `FUN_0040ce60` masks each response cell to its low nibble.
-3. **Response selector 0 (idle)**: host sends a **time-sync frame**: the
-   response copy with `byte[1] |= 4`, cursor (7,7), then fields: 3 flag bits
-   (`(local_6f8 ? 4 : 0) | local_6fc`), month(4)/day(5)/hour(5)/minute(6)
-   from the current time, 6 bits at offset 2, 1 bit `local_71c`; 64 bits,
-   one chunk, repeated about every 57 minutes or when `weather.dat` mtime changes.
+3. **Periodic control frame**: the host copies the current response prefix,
+   sets `cell[1] |= 4`, fills cells 8 onward with `0x10`, and starts at
+   cursor (7,7). It appends a 3-bit mode/flag value, parsed fields of widths
+   4/3/3/2, and the 1-bit `local_71c` flag; checksum finalization produces a
+   64-bit segment and one 16-cell write. This frame is emitted after a
+   `weather.dat` modification and on an approximately 57-minute interval.
+   The four parsed values' meanings and conversions remain unresolved; this
+   is not established as a wall-clock time-sync frame.
 4. **Selector 1 / 6 / 8**: city handshake, Day-1 and later-day answers
    (documented above).
 
 The packer `FUN_0040d340` stores data in each byte's low nibble (`0x10`
 filler kept in the high nibble); `FUN_0040cee0` is the nibble-array variant.
 
-Open: the init and time-sync frames are the only host-initiated frames our
-native code does not emit. They are the next candidates for making the
-display react; implementing them requires decoding `FUN_0040bc70` and the
-source of `local_430` first.
+The init frame, generic 64-bit checksum placement, periodic control-frame
+layout, and retry/recovery state transitions are implemented offline in
+`src/weather_session.c`. The init builder takes the already-packed 8-bit reg.dat-derived field; the
+periodic builder takes the field values after the original host's record
+parsing. The periodic frame's cursor and field widths
+are recovered, but those fields' meanings and source conversions are not.
+Neither builder is connected to live I/O, and no frame should be described as
+display-accepted. The next work is to port record parsing and selector
+dispatch, then integrate the tested lifecycle with the USB callbacks.

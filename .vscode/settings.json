@@ -72,6 +72,10 @@
     "/^id; lsusb -d 1130:0202 2>&1 \\|\\| true; ls -l builddir/weather-life-discover builddir/tests/weather-life-native-tests 2>&1 \\|\\| true; meson test -C builddir --print-errorlogs$/": {
       "approve": true,
       "matchCommandLine": true
+    },
+    "/^meson test -C builddir --print-errorlogs$/": {
+      "approve": true,
+      "matchCommandLine": true
     }
   }
 }

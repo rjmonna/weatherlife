@@ -45,7 +45,9 @@ usb_lib_sources = [
   'src/device_registration.c',
   'src/bit_packer.c',
   'src/weather_frame.c',
+  'src/weather_session.c',
   'src/weather_icons.c',
+  'src/weather_sender.c',
 ] + platform_files
 
 usb_lib = static_library(
@@ -67,7 +69,7 @@ weather_discover = executable(
 )
 
 # Installation
-install_headers('src/usb_device.h', 'src/weather_response.h', 'src/device_registration.h', 'src/bit_packer.h', 'src/weather_frame.h', subdir: 'weather-life')
+install_headers('src/usb_device.h', 'src/weather_response.h', 'src/device_registration.h', 'src/bit_packer.h', 'src/weather_frame.h', 'src/weather_session.h', 'src/weather_sender.h', subdir: 'weather-life')
 
 # Tests (if any)
 subdir('tests')

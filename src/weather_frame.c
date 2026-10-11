@@ -108,7 +108,7 @@ bool weather_frame_append_native_selector6_fields(
                WEATHER_FRAME_NATIVE_SELECTOR6_FIELDS_BIT_LENGTH;
 }
 
-static uint8_t selector6_checksum_table_value(uint8_t value)
+static uint8_t native_checksum_table_value(uint8_t value)
 {
     for (int bit = 0; bit < 8; bit++) {
         value = (value & 0x80)
@@ -118,11 +118,36 @@ static uint8_t selector6_checksum_table_value(uint8_t value)
     return value;
 }
 
+bool weather_frame_finalize_native_segment(
+    uint8_t* frame, size_t cell_count, size_t segment_bit_length)
+{
+    uint8_t checksum = 0;
+    size_t logical_bytes;
+    size_t checksum_cell;
+
+    if (!frame || (segment_bit_length != 64 && segment_bit_length != 128) ||
+        cell_count < segment_bit_length / 4) {
+        return false;
+    }
+
+    logical_bytes = (segment_bit_length - 8) / 8;
+    checksum_cell = (segment_bit_length - 8) / 4;
+    for (size_t i = 0; i < logical_bytes; i++) {
+        uint8_t value =
+            (uint8_t)(((frame[i * 2] & 0x0f) << 4) |
+                      (frame[i * 2 + 1] & 0x0f));
+        checksum ^= native_checksum_table_value(value);
+    }
+
+    frame[checksum_cell] |= (uint8_t)(0x10 | (checksum >> 4));
+    frame[checksum_cell + 1] |= (uint8_t)(checksum & 0x0f);
+    return true;
+}
+
 static bool finalize_native_primary(BitPacker* packer,
                                     uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS],
                                     size_t field_bit_length)
 {
-    uint8_t checksum = 0;
     const size_t expected_position =
         WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET * 8 +
         WEATHER_FRAME_NATIVE_PAYLOAD_BIT_OFFSET +
@@ -145,16 +170,8 @@ static bool finalize_native_primary(BitPacker* packer,
         return false;
     }
 
-    for (size_t logical_byte = 0; logical_byte < 15; logical_byte++) {
-        uint8_t high_nibble = frame[logical_byte * 2] & 0x0f;
-        uint8_t low_nibble = frame[logical_byte * 2 + 1] & 0x0f;
-        uint8_t value = (uint8_t)((high_nibble << 4) | low_nibble);
-        checksum ^= selector6_checksum_table_value(value);
-    }
-
-    frame[30] |= (uint8_t)(0x10 | (checksum >> 4));
-    frame[31] |= (uint8_t)(checksum & 0x0f);
-    return true;
+    return weather_frame_finalize_native_segment(
+        frame, WEATHER_FRAME_NATIVE_SEGMENT_CELLS, 128);
 }
 
 bool weather_frame_finalize_native_selector6(

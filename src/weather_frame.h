@@ -75,6 +75,12 @@ bool weather_frame_append_native_selector6_fields(
 bool weather_frame_finalize_native_selector6(
     BitPacker* packer, uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS]);
 
+// Append the native XOR-of-table checksum for a 64- or 128-bit segment.
+// Cells are nibble-expanded bytes and the caller must initialize the unused
+// payload cells to 0x10 before packing.
+bool weather_frame_finalize_native_segment(
+    uint8_t* frame, size_t cell_count, size_t segment_bit_length);
+
 // Build a complete checksummed selector-6 segment from readback cells and
 // already-converted field values. This does not infer any unknown conversions.
 bool weather_frame_build_native_selector6(
