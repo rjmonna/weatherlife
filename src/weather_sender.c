@@ -445,6 +445,44 @@ static WeatherSenderResult build_later_second(
     return WEATHER_SENDER_OK;
 }
 
+// usbwr.exe FUN_00401400 cases 0-4: the 40-byte table is the upper-cased text
+// between the first and second ';' of the CITY_AND_WMO line. Selector 0 sends
+// strlen then table[0..8]; selectors 1-4 send ten bytes from offsets 7/15/23/31.
+static WeatherSenderResult build_header(
+    unsigned selector, const WeatherLegacyResponse* weather,
+    const uint8_t* readback_cells, size_t readback_cell_count,
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    uint8_t table[40] = {0};
+    uint8_t values[WEATHER_FRAME_NATIVE_HEADER_VALUES] = {0};
+    const char* text = NULL;
+    size_t length = 0;
+
+    for (size_t i = 0; i < weather->current_record_count; i++) {
+        if (strcmp(weather->current[i].key, "CITY_AND_WMO") == 0) {
+            text = value_text(&weather->current[i]);
+            break;
+        }
+    }
+    if (text && (text = strchr(text, ';')) != NULL) {
+        for (text++; text[length] && text[length] != ';' &&
+                     text[length] != '\r' && length < 39; length++) {
+            char c = text[length];
+            table[length] = (uint8_t)((c >= 'a' && c <= 'z') ? c - 0x20 : c);
+        }
+    }
+    if (selector == 0) {
+        values[0] = (uint8_t)length;
+        memcpy(values + 1, table, 9);
+    } else {
+        memcpy(values, table + 7 + 8 * (selector - 1), 10);
+    }
+    return weather_frame_build_native_header(readback_cells,
+                                             readback_cell_count, values, frame)
+               ? WEATHER_SENDER_OK
+               : WEATHER_SENDER_INVALID_VALUE;
+}
+
 WeatherSenderResult weather_sender_build_weather_segment(
     unsigned selector, const WeatherLegacyResponse* weather,
     const uint8_t* readback_cells, size_t readback_cell_count,
@@ -456,6 +494,10 @@ WeatherSenderResult weather_sender_build_weather_segment(
 
     if (!weather || !readback_cells || !frame) {
         return WEATHER_SENDER_INVALID_VALUE;
+    }
+    if (selector <= 4) {
+        return build_header(selector, weather, readback_cells,
+                            readback_cell_count, frame);
     }
     if (selector == 6) {
         day_number = 1;

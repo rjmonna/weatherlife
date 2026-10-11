@@ -1753,3 +1753,110 @@ are recovered, but those fields' meanings and source conversions are not.
 Neither builder is connected to live I/O, and no frame should be described as
 display-accepted. The next work is to port record parsing and selector
 dispatch, then integrate the tested lifecycle with the USB callbacks.
+
+### Registration Plus 60 s Serve Attempt (2026-10-11)
+
+After a confirmed registration probe, `--serve-weather` ran for 60 s against the
+installed `weather.dat` (Rotterdam; its first `Netherlands;Rotterdam` line had to
+be stripped because the parser rejects it). The dongle's readback stayed idle
+and it never requested a selector, so nothing was answered. The startup init
+frame was not sent: its 8-bit field comes from an unresolved `reg.dat`
+extraction (`reg.dat` holds `<c48eb> <0> <01> <0>`), and guessing it is not
+permitted. Display acceptance remains unproven.
+
+## Init-Field Derivation and Registered Serve Run
+
+Decompiling `usbwr.exe` (`FUN_0040c720`, `FUN_0040cb50`, `FUN_0040d340`) shows
+the init frame's control field is the last two hex digits of the `reg.dat`
+code, packed as nibbles, with session flag 1. `--serve-weather <file> <secs>
+[reg-code]` now registers, sends the init frame, then serves selectors.
+
+Physical result: registration acknowledged, init frame written, but the dongle
+still only requested selector 0 (not enabled) during a 60 s run. Display
+acceptance remains unproven; no camera or user observation of the LCD exists.
+Open items: `device.dat`-driven session flag, control-frame fields, and
+visual confirmation.
+
+## LCD Capabilities and Header Selector Experiment (2026-10-11)
+
+User observations: the LCD has no city names; it only has fixed segments for
+the current temperature and four forecast days, plus the clock and internal
+sensor temperature (not host-controllable). Consequences:
+
+- Header selectors 0-4 (ten 8-bit values each, `usbwr.exe` `FUN_00401400`)
+  cannot carry display text for this model; their meaning is unproven.
+- Only current temperature, four forecast days and (probably via selector 5)
+  the clock are relevant; Days 5-7 are likely ignored by this LCD.
+- `weather.exe` is ASPack packed (unpacked below, 2026-10-11); it needed
+  unpacking before analysis.
+
+Experiment: `weather_frame_build_native_header` answers selectors 0-4 with ten
+zero bytes. On hardware the dongle kept re-requesting selector 0 (HID writes
+accepted), so the neutral header does not advance the session. Display
+acceptance remains unproven; next step is deriving the real selector-0 first
+byte (`ebp-0x7a4`) and the table source.
+
+### Selector 0-4 Header Source (2026-10-11, experimental)
+
+`FUN_004105e0` takes the text after the first `;` of the `CITY_AND_WMO` record
+and truncates it at the next `;`/CR; `FUN_00429e60` upper-cases it. This 40-byte
+table feeds selectors 0-4 (selector 0: length + table[0..8]; selectors 1-4: ten
+bytes from offsets 7/15/23/31). `weather_sender.c` now builds these from the
+record. A 20 s physical run (HID writes accepted) still saw the dongle request
+only selector 0, so acceptance remains unproven. The LCD has no text, so the
+table's purpose is unknown.
+
+### weather.exe Unpacked (2026-10-11)
+
+`weather.exe` is a Delphi 32-bit program packed with ASPack (entry in
+`.aspack`). It was unpacked offline by emulating the stub in Unicorn with fake
+API thunks (no execution of the original program). The stub decompresses CODE
+via `VirtualAlloc` buffers and finishes with a "call a patched `ret`" loop
+(`call edi` at stub `+0x118`); the true OEP is RVA `0xe0818` (`55 8b ec ...`
+Delphi `entry`). The dump then yields 4572 functions that Ghidra decompiles
+with 0 failures. Imports are not rebuilt, so API calls show as unresolved
+thunks; strings and control flow are intact.
+
+Confirmed from the unpacked code:
+
+- `weather.exe` is the UI/registration shell only. It loads `usbwr.dll` from
+  its own directory, resolves `usbdeviceread` (`FUN_004df48c`) and calls it
+  with five string arguments; a 5-character result means "device present"
+  (`DAT_004e7625`), otherwise the UI shows "No USB Device".
+- On registration (`FUN_004df1f8`, notices `Device Register...` /
+  `Device Register End`) it writes `Device.dat` containing `device=ON`.
+  `usbwr.exe` watches that file (see the `device.dat` mtime watch above).
+- The UI persists country/city/area code in `images\cfg`/`reg.ini` and reads
+  the city list from `weather.dat`/`weather2.dat`, downloaded from
+  `http://www.weather-life.com/update/city/` (dead server). It also references
+  `update\update.exe`.
+- It contains no HID/USB frame or selector code. The display payload
+  therefore remains solely in `usbwr.exe` (already ported), and unpacking
+  `weather.exe` does not resolve why the dongle only requests selector 0.
+
+### Request-Type Decode in usbwr.exe (2026-10-11)
+
+In the `usbwr.exe` main loop the dongle's readback is parsed as
+`request_type = cell[1] & 0xf`, and the loop only has branches for request
+types 1, 6 and 8 (all others fall through with no write). The idle readback
+(16 x `0x10`) therefore decodes to request type 0, which the original ignores.
+The "selector 0" our serve loop logs is this idle state, not a request for
+data. The original only answers when the dongle reports a non-idle request
+type; the selector then derives from `((b0 & 3) << 4) | (b1 & 0xf)` of the
+request cells. Hypothesis (unproven): the dongle raises a request only after a
+physical user action (for example a sync button), so the serve loop should be
+run while that action is performed, and answers should be sent only for
+request types 1, 6 and 8.
+
+### Live Serve Run After Registration (2026-10-11)
+
+- With the registration code supplied, registration is acknowledged and the init
+  frame is accepted; afterwards the dongle returns an all-`0x10` (idle) readback,
+  which the serve loop now skips, matching the original ignoring request type 0.
+- In one run the dongle then requested selector 11 (readback
+  `10 1b 18 10 18 10 10 10 10 10 10 10 10 10 18 1a`). The sender rejected it
+  because the legacy time records `<HH>hour,<MM>min` were stored with the minute
+  dropped; the parser now normalises them to `<HH:MM>`. Selector 11 could not be
+  re-triggered in later runs (the dongle stayed idle for 40 s), so no segment was
+  answered live afterwards.
+- LCD acceptance remains unproven; only a visual observation can confirm it.

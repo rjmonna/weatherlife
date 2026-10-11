@@ -3,6 +3,7 @@
 #include "weather_response.h"
 #include <ctype.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -75,6 +76,24 @@ static bool append_record(const char* line, WeatherLegacyRecord* record)
     if (value_length >= sizeof(record->value)) return false;
     memcpy(record->value, value_open, value_length);
     record->value[value_length] = '\0';
+    {
+        // Legacy time records read "<HH>hour,<MM>min"; normalise to "<HH:MM>".
+        const char* minute_open;
+        const char* minute_close;
+        size_t hour_digits = value_length - 2;
+
+        if (strncmp(value_close + 1, "hour,<", 6) == 0 &&
+            (minute_close = strchr((minute_open = value_close + 7), '>')) &&
+            strncmp(minute_close + 1, "min", 3) == 0) {
+            size_t minute_digits = (size_t)(minute_close - minute_open);
+            if (hour_digits + minute_digits + 4 >= sizeof(record->value)) {
+                return false;
+            }
+            snprintf(record->value, sizeof(record->value), "<%.*s:%.*s>",
+                     (int)hour_digits, value_open + 1,
+                     (int)minute_digits, minute_open);
+        }
+    }
     record->bit_length = (int)bit_length;
     return true;
 }

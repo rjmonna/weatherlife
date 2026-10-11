@@ -181,6 +181,24 @@ bool weather_frame_finalize_native_selector6(
         packer, frame, WEATHER_FRAME_NATIVE_SELECTOR6_FIELDS_BIT_LENGTH);
 }
 
+bool weather_frame_build_native_header(
+    const uint8_t* readback_cells, size_t readback_size,
+    const uint8_t values[WEATHER_FRAME_NATIVE_HEADER_VALUES],
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
+{
+    BitPacker packer;
+
+    if (!values || !weather_frame_begin_native_selector6(
+                       &packer, readback_cells, readback_size, frame)) {
+        return false;
+    }
+    for (size_t i = 0; i < WEATHER_FRAME_NATIVE_HEADER_VALUES; i++) {
+        bit_packer_append(&packer, values[i], 8);
+    }
+    return finalize_native_primary(&packer, frame,
+                                   WEATHER_FRAME_NATIVE_HEADER_VALUES * 8);
+}
+
 bool weather_frame_build_native_selector6(
     const uint8_t* readback_cells, size_t readback_size,
     const WeatherFrameNativeSelector6Fields* fields,

@@ -235,7 +235,7 @@ static int test_weather_sender(void)
         prefix, sizeof(prefix), &day2_second, expected));
     ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
 
-    ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+    ASSERT_INT(WEATHER_SENDER_OK,
                weather_sender_build_weather_segment(
                    1, &parsed, prefix, sizeof(prefix), actual));
     ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,

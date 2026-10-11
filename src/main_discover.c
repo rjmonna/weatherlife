@@ -224,10 +224,62 @@ static bool parse_positive_seconds(const char* text, int* seconds)
 // Respond only to supported forecast requests. Initialization and the
 // selector-1 city exchange remain gated because their complete source data
 // and response contract are not yet decoded.
+// Mirrors usbwr.exe startup: repeat the registration frame every 100 ms until
+// the readback echoes the id, then send the 64-bit init frame whose 8-bit field
+// is the last two hex digits of the reg.dat code ("c48eb" -> 0xeb) and whose
+// session flag starts at 1.
+static bool run_registration_and_init(USBBackend* backend, USBDevice* device,
+                                      const char* reg_code)
+{
+    uint8_t field_hex[2];
+    WeatherRegistrationId id;
+    uint8_t reg[WEATHER_FRAME_SIZE];
+    bool matched = false;
+
+    if (!reg_code || strlen(reg_code) != 5) return false;
+    for (int i = 0; i < 2; i++) {
+        char c = reg_code[3 + i];
+        if (c >= '0' && c <= '9') field_hex[i] = (uint8_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') field_hex[i] = (uint8_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') field_hex[i] = (uint8_t)(c - 'A' + 10);
+        else return false;
+    }
+    srand((unsigned)time(NULL));
+    weather_registration_generate_id(&id);
+    weather_registration_build_frame(&id, reg);
+    for (int attempt = 0; attempt < 30 && !matched; attempt++) {
+        uint8_t resp[WEATHER_FRAME_SIZE];
+        uint8_t decoded[WEATHER_REGISTRATION_FRAME_SIZE];
+        int length = 0;
+        if (!backend->write_data(device, reg, sizeof(reg))) return false;
+        SLEEP(100);
+        if (backend->read_data(device, resp, sizeof(resp), &length) &&
+            length >= WEATHER_REGISTRATION_FRAME_SIZE) {
+            weather_registration_decode_response(resp, decoded);
+            matched = weather_registration_response_matches(decoded, &id);
+        }
+    }
+    printf("Registration acknowledgment: %s\n", matched ? "matched" : "not matched");
+    if (!matched) return false;
+
+    uint8_t init[WEATHER_FRAME_SIZE];
+    if (!weather_session_build_init_frame((uint8_t)((field_hex[0] << 4) | field_hex[1]),
+                                          true, init) ||
+        !write_native_segment(backend, device, init, sizeof(init))) {
+        return false;
+    }
+    printf("Init frame sent (field 0x%02x)\n", (field_hex[0] << 4) | field_hex[1]);
+    return true;
+}
+
 static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
                                   const WeatherLegacyResponse* weather,
-                                  int seconds)
+                                  int seconds, const char* reg_code)
 {
+    if (reg_code && !run_registration_and_init(backend, device, reg_code)) {
+        fprintf(stderr, "[-] Registration/init failed\n");
+        return false;
+    }
     int last_length = 0;
     uint8_t last[WEATHER_FRAME_SIZE] = {0};
     bool have_last = false;
@@ -261,10 +313,21 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
         bool changed = !have_last || length != last_length ||
                        memcmp(last, response, (size_t)length) != 0;
         if (changed) {
-            printf("Device requested selector %u\n", selector);
+            printf("Device requested selector %u; readback:", selector);
+            for (int i = 0; i < length; i++) printf(" %02x", response[i]);
+            printf("\n");
             memcpy(last, response, (size_t)length);
             last_length = length;
             have_last = true;
+        }
+        bool idle = true;
+        for (int i = 0; i < length; i++) {
+            if (response[i] != 0x10) idle = false;
+        }
+        if (idle) {
+            // usbwr.exe only has branches for request types 1, 6 and 8.
+            SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
+            continue;
         }
         uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
         WeatherSenderResult result = weather_sender_build_weather_segment(
@@ -276,7 +339,6 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
         } else if (result != WEATHER_SENDER_OK) {
             fprintf(stderr, "[-] Selector %u not answered: %s\n", selector,
                     weather_sender_result_text(result));
-            return false;
         } else if (!write_native_segment(
                        backend, device, frame,
                        WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
@@ -503,9 +565,9 @@ int main(int argc, char* argv[])
                               strcmp(argv[1], "--print-weather-frame") == 0;
 
     if (listen_mode) {
-        if (argc != 4 || !parse_positive_seconds(argv[3], &listen_seconds)) {
+        if ((argc != 4 && argc != 5) || !parse_positive_seconds(argv[3], &listen_seconds)) {
             fprintf(stderr,
-                    "Usage: %s --serve-weather <legacy-weather-file> <seconds>\n",
+                    "Usage: %s --serve-weather <legacy-weather-file> <seconds> [reg-code]\n",
                     argv[0]);
             return 2;
         }
@@ -640,7 +702,8 @@ int main(int argc, char* argv[])
 
     if (listen_seconds > 0) {
         bool ok = run_listen_and_answer(backend, &device, &weather,
-                                        listen_seconds);
+                                        listen_seconds,
+                                        argc == 5 ? argv[4] : NULL);
         usb_close(&device);
         backend->free_device_list(devices);
         return ok ? 0 : 1;

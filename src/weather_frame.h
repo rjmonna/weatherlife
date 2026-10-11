@@ -18,6 +18,15 @@
 #define WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS 10
 #define WEATHER_FRAME_NATIVE_SELECTOR6_FIELDS_BIT_OFFSET 40
 #define WEATHER_FRAME_NATIVE_SELECTOR6_FIELDS_BIT_LENGTH 79
+#define WEATHER_FRAME_NATIVE_HEADER_VALUES 10
+
+// Experimental: selectors 0-4 pack ten 8-bit values (usbwr.exe FUN_00401400).
+// The LCD has no text segments, so their meaning is unproven; callers pass
+// neutral values only to let the dongle's request sequence advance.
+bool weather_frame_build_native_header(
+    const uint8_t* readback_cells, size_t readback_size,
+    const uint8_t values[WEATHER_FRAME_NATIVE_HEADER_VALUES],
+    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS]);
 #define WEATHER_FRAME_NATIVE_LATER_DAY_FIRST_BIT_LENGTH 79
 #define WEATHER_FRAME_NATIVE_LATER_DAY_SECOND_BIT_LENGTH 75
 #define WEATHER_FRAME_NATIVE_PAYLOAD_OFFSET 10 // nibble-cell index in the native buffer
