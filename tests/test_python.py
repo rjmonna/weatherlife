@@ -151,6 +151,44 @@ class WeatherProviderTests(unittest.TestCase):
         self.assertEqual(weather_code_description(999), "Unknown (999)")
 
 
+class LegacyWriterTests(unittest.TestCase):
+    def test_generated_file_parses_with_legacy_parser(self):
+        from datetime import datetime
+        from legacy_weather_writer import beaufort, build_legacy_text, direction
+
+        daily = {
+            "time": ["2026-10-18", "2026-10-19"],
+            "weather_code": [61, 0],
+            "temperature_2m_max": [11.2, 12.0],
+            "temperature_2m_min": [9.1, 8.0],
+            "wind_speed_10m_max": [16.0, 5.0],
+            "wind_direction_10m_dominant": [45, 270],
+            "relative_humidity_2m_mean": [85, 70],
+            "sunrise": ["2026-10-18T08:13", "2026-10-19T08:15"],
+            "sunset": ["2026-10-18T18:34", "2026-10-19T18:32"],
+            "precipitation_probability_max": [60, 10],
+            "precipitation_sum": [0.7, 0.0],
+            "sunshine_duration": [8640, 20000],
+            "uv_index_max": [2, 3],
+            "dew_point_2m_mean": [7.0, 6.0],
+        }
+        current = {
+            "temperature_2m": 9.4, "relative_humidity_2m": 87,
+            "apparent_temperature": 7.5, "weather_code": 0,
+            "wind_speed_10m": 9, "wind_direction_10m": 0, "pressure_msl": 1027.2,
+            "visibility": 50000, "uv_index": 0, "dew_point_2m": 7.4,
+        }
+        location = Location(name="Rotterdam", latitude=51.9, longitude=4.5,
+                            country="Netherlands")
+        text = build_legacy_text(location, {"current": current, "daily": daily},
+                                 datetime(2026, 10, 18, 5, 55), city_line=False)
+        document = parse_legacy_weather(text)
+        self.assertEqual(2, len(document.daily))
+        self.assertEqual("NO", direction(45))
+        self.assertEqual(3, beaufort(16))
+        self.assertIn("<08>hour,<13>min;", text)
+
+
 class IconTests(unittest.TestCase):
     def test_icon_index(self):
         self.assertEqual(icon_index("SO____"), 0)

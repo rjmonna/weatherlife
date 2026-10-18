@@ -1860,3 +1860,77 @@ request types 1, 6 and 8.
   re-triggered in later runs (the dongle stayed idle for 40 s), so no segment was
   answered live afterwards.
 - LCD acceptance remains unproven; only a visual observation can confirm it.
+
+### Fresh Startup Capture and Registered Serve Run (2026-10-18)
+
+- `traces/startup-spawn-20261018.jsonl` (weather.exe spawned under the tracer): `weather.exe` itself sends one registration frame (cell 1 = `8`, CRC over cells 0..13 verified with `python/dongle_protocol.py`), then starts `usbwr.exe`.
+- `traces/startup-attach-20261018.jsonl` (both processes): `usbwr.exe` sent one 16-cell frame with cell 1 = `4` (`10 14 10 10 10 10 10 11 10 1d 10 17 1a 16 17 14`), whose CRC verifies; this matches the documented periodic control-frame shape (prefix copied from the idle readback, `cell[1] |= 4`). Over the following ~40 s there were 272 polls, all idle (`0x10`).
+- Registered `--serve-weather` run: registration acknowledged, init frame (field `0xeb`) accepted, and the dongle again requested selector 11 right after init (same readback as 2026-10-11, so it is reproducible, not a one-off). Several later readbacks were corrupt: they contained the literal bytes `55 53 42 43 00 10 01 00` (the USBC read header) after 8 cells, i.e. a read that did not return a clean feature report. The serve loop mis-treated them as selector 0 and wrote segments; it should reject any readback with a cell whose high nibble is not `1`.
+- `CMakeLists.txt` was missing `weather_sender.c` and `weather_session.c`, so the CMake build of `weather-life-discover` failed to link; fixed.
+- Display change was not observed/confirmed.
+
+### Request-Type Gate Re-Read (2026-10-18, usbwr.exe disassembly)
+
+In `FUN_00401400` the readback is decoded into a second buffer (`0x004010c3`, 16 cells); the request switch at `0x00404f9a` runs only when decoded cell 1 is non-zero (idle falls through to the weather.dat/periodic-control-frame code at `0x00403f80`) and the read returned > 0. Only types 1, 6 and 8 branch; every other value, including the `0x0b` seen after our init/weather writes, jumps to `0x004091a9` and is ignored. So the "selector 11" seen on 2026-10-11 and 2026-10-18 is the dongle's post-write state, not a data request, and the earlier answer to it was not original behavior. The serve loop now answers only types 1/6/8 and drops readbacks with a high nibble other than `1`. No type 1/6/8 request has been observed from hardware since registration.
+
+### Gate Trace and 180 s Serve Run (2026-10-18)
+
+- Static: the `[ebp-0xa44]`-adjacent gate `[ebp-0xa44]`/`0xfffff5bc` is the `LoadLibrary`-style handle for the DLL named at `0x4470a8` (retried with `Sleep` until non-null), so it is trivially true at runtime. The only data-dependent gate before the type switch is decoded cell 1 != 0, i.e. the request must originate from the dongle firmware; there is no host-side condition left to satisfy. `device.dat` (`0x447224`) is only watched for mtime changes that trigger the periodic control frame.
+- Hardware (registered, init sent, no weather writes): over 180 s the dongle went idle -> `10 1b 18 10 18 10 10 10 10 10 10 10 10 10 18 1a` (cell 1 = `0x0b`) -> idle repeatedly, four times, with the identical readback each time. With no host write between them, `0x0b` is therefore a dongle-originated periodic state, not a write acknowledgment as previously assumed. The original ignores it. No type 1/6/8 appeared.
+
+### Periodic 64-Bit Frame Decoded as Mode + UPD Timestamp (2026-10-18)
+
+Every 17-byte write in `weather-native-*-20261009.jsonl`, `startup-attach-20261018.jsonl` and `startup-spawn-20261018.jsonl` after registration is the same ~58 s frame (stack return `0x00404b89`/`0x00404eef` is the `CAL_USB_WRITE` call in the loop that sends the 64-bit segment). Disassembly of `0x00404500..0x00404b89` and bit-for-bit comparison with the traces show its layout, starting at cell 7 bit 7 (cell 7 contributes 1 bit, later cells 4 bits each):
+
+| Bits | Field | Source |
+|---|---|---|
+| 3 | mode = `(f90c ? 4 : 0) \| f908` | `f90c` is a boolean initialised to 1 (cleared at `0x403f5f`, set at `0x40421d`); `f908` is a single digit read from a text line at `0x403214` (value 0..3) |
+| 4 / 5 / 5 / 6 | UPD month / day / hour / minute | the `UPD` record values of `weather.dat` (`<03>,<08>,<07>,<41>` = 3/8 07:41), extracted with `FUN_0040b9d0` (src bit offset, width) = (4,4), (3,5), (3,5), (2,6) |
+| 1 | flag from `[ebp-0x718]` (`f8e8`) | set to 1 by the init path |
+
+Check: the startup frame `10 14 10 10 10 10 10 11 10 1d 10 17 1a 16 17 14` unpacks to prefix `100`, then `0011 01000 00111 101001`, exactly the 3/8 07:41 stamp. Code at `0x004049b2..0x00404ad5` also derives the local-minus-UTC hour offset (`GetLocalTime`/`GetSystemTime`) and rolls the day/month/year counters (`f900`, `f904`, `f914`) with a days-per-month table.
+
+Consequences:
+- This frame carries no temperature, icon, or forecast data. It tells the dongle when the host data was last refreshed. The earlier "controlled TEMP / Day-1 TEMPH changes alter the first weather payload" conclusion is not supported: the changing cells were the 3-bit mode prefix (observed values 4,5,6,7 and 1,2) and its checksum, which vary with the text-derived setting and flag rather than with the weather records. Treat that earlier proof as retracted until a type 1/6/8 write is captured.
+- Actual weather content (selector 6 Day-1 block, selectors 8..17 for later days, selector 1 city) is only sent in reply to a dongle request of type 1, 6 or 8, which has not been observed on hardware since registration.
+- Display model (user report: cloud/weather symbols, fixed temperature segments, five fixed forecast slots) fits the selector layouts: the Day-1 block carries `TEMPH/TEMPL` (9 bits each), a 7-bit morning icon and a 5-bit afternoon icon (79 icon names), plus wind/BFT/WW/HUM; later days use paired blocks. Which slot each selector fills on the LCD remains unobserved.
+
+### Simulated Weather Update (2026-10-18)
+
+`weather-life-discover --simulate-weather-update <legacy-file> <reg-code>` replaces the dead website refresh: register, init frame, a timestamp frame (`weather_session_build_timestamp_frame`, golden-tested against the captured `10 14 10 10 10 10 10 11 10 1d 10 17 1a 16 17 14`; its prefix cells keep the `0x10` high nibble, unlike the older `weather_session_build_control_frame`, which masks them), then selector 8..15 segments for days 2-5, reading back after each. On hardware all writes were accepted and every readback stayed idle (`0x10`); no LCD change was reported. Selector 6 (Day 1) was skipped because `build_day1` rejected a value in the installed Rotterdam `weather.dat` (not yet identified).
+
+### No Dongle Request in Any Capture (2026-10-18)
+
+Tallying cell 0/cell 1 of every `HidD_GetFeature` readback in all 23 traces (about 40,000 polls, original app and our tools): only `00` (idle) and `0b` (the dongle echoing the last written frame with cell 1 = `b`, cell 2 = `8`) occur. Request types 1, 6 and 8 never appear, so no capture contains a real weather-data exchange, and the simulated unsolicited writes (`--simulate-weather-update`) changed nothing on the LCD. Hypothesis (unproven): the LCD is a separate wireless unit with its own sensor, and the dongle only relays its RF request (sync button or periodic) to the host, so data is accepted only as an answer to such a request.
+
+### Host Session Now Matches the Original on the Wire (2026-10-18)
+
+`--serve-weather <file> <secs> <reg-code>` now follows `usbwr.exe`: registration, init frame, 130 ms polls, and a UPD timestamp frame (taken from the file's raw `UPD` line, since the record parser keeps only the first value) every 58 s. A 5-minute hardware run produced the same dongle behavior as the original traces: after each timestamp write the readback becomes `10 1b 18 10 10 10 10 11 10 1d 10 17 1a 16 17 14`, i.e. the written frame with cell 1 = `b` and cell 2 = `8`, then returns to idle. No type 1/6/8 request occurred, so the host side is no longer a differentiator from the original; the missing trigger is on the dongle/LCD side.
+
+### weather.exe Refresh Replacement and Day-1 Mismatch (2026-10-18)
+
+`python/legacy_weather_writer.py --city <name> --output <weather.dat>` replaces the dead download: it queries Open-Meteo (current plus six days) and writes the legacy named-record format using the archive's bit-length column. Icons (WMO code -> legacy icon name), 8-point Dutch compass tokens and the morning/afternoon/night split are approximations. Sending its output with `--simulate-weather-update` now answers selectors 8..15 (days 2-5); all were accepted and read back idle.
+
+Selector 6 (Day 1) is still rejected for real data: `build_day1` parses `WW` and `AFWW` as integers and `AFTERNOON_N` as a compass, but the archive and generated files carry compass letters in `WW`/`AFWW` and an icon name in `AFTERNOON_N` (the later-day builders use compass/icon respectively). Replacing the two compass tokens with `0` makes selector 6 send. Either the Day-1 slot-to-field mapping in `docs` above is mis-assigned or the original converts text with an atoi-like fallback; this needs a `FUN_0040b9d0` call-site check before changing the builder.
+
+### Correction: Selector 6 Is the Current-Conditions Block; Selectors 8..17 Are DAY1..DAY5 (2026-10-18)
+
+Re-reading the selector-6 slot table against the archived records resolves the Day-1 rejection. Its slot widths/conversions are 9 temperature, 9 temperature, 7 icon, 11 integer (`.` discarded), 2 sentinel integer, 8 integer, 0 consumed, 5 compass, 7 sentinel integer, 8 `int*10+suffix`, 5 sentinel integer, 8 signed-humidity. These match the *current* records in order, not DAY1:
+
+| Slot | Current record | Evidence |
+| ---: | --- | --- |
+| 0 / 1 | `TEMP` / `BTEMP` | 9-bit temperatures; `N/A` -> `0xff` (BTEMP is `N/A` in the archive) |
+| 2 | `WEA` | 79-name icon index |
+| 3 | `PRE` | 11 bits, `1030.8` -> 1030 (hPa) |
+| 4 | `TREND` | 2 bits |
+| 5 / 6 | `WS` / `BFT` | integer / consumed (0 bits) |
+| 7 | `WW` | compass index (the archive holds `N`, `NO`, `NW`) |
+| 8 | `HUM` | 7 bits |
+| 9 | `VIS` | `int*10+suffix`, clamped to 254 |
+| 10 / 11 | `UVI` / `DEWP` | 5-bit sentinel integer / signed 8-bit |
+
+The previously labelled "unresolved current-condition group" and the experimental `weather_frame_build` input (current temperature, background temperature, pressure trend, visibility, UV, dew point) agree with this. Consequently the pair `8/9` encodes DAY1, `10/11` DAY2, ... `16/17` DAY5 (selectors 18/19 would be DAY6), matching the LCD's five fixed forecast days. `weather_sender.c` now implements this mapping (`build_current`, `day = 1 + (selector - 8) / 2`) and the native tests were updated accordingly. Earlier statements in this file that call selector 6 the Day-1 block or selectors 8..17 days 2-6 predate this correction. `BTEMP` is parsed from the file text; the original's computed value (`FUN_00412e60`) is not reproduced. A simulated update with Open-Meteo data (selectors 6, 8..17) was accepted by the dongle with idle readbacks; LCD effect unobserved.
+
+### Removed Unproven Write Experiments (2026-10-18)
+
+`weather-life-discover` no longer contains `--simulate-weather-update`, `--sweep-writes`, `--fuzz-writes`, `--send-selector6-fixture-test-once` or `--print-selector6-fixture-test`. They sent guessed or fixture-valued segments (some under the retracted Day-1 mapping) and none produced a dongle request or LCD change, so they proved nothing. References to them in earlier sections are historical. The remaining write paths are the registration handshake, `--serve-weather` (init frame, 58 s UPD timestamp frame, answers only type 1/6/8 requests) and `--send-observed-weather-payload-once`, which replays a frame captured from the original.

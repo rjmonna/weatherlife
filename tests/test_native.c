@@ -130,21 +130,19 @@ static int test_response_parser(void)
 static int test_weather_sender(void)
 {
     const char response[] =
-        "TEMP <9> <12.0>;\n"
-        "DAY1 20260918;\n"
-        "TEMPH <9> <6.9>;\n"
-        "TEMPL <9> <-3.8>;\n"
-        "MORING_ICON <7> <SO____>;\n"
-        "WS <11> <-2.5>;\n"
-        "WBFT <2> <N/A>;\n"
-        "WW <8> <7.9>;\n"
-        "HUM <0> <0>;\n"
-        "AFTERNOON_N <5> <NW>;\n"
-        "AFWS <7> <N/A>;\n"
-        "AFBFT <8> <3.4>;\n"
-        "AFWW <5> <-1>;\n"
-        "AFHUM <8> <-2.6>;\n"
-        "DAY2 20260919;\n"
+        "TEMP <9> <6.9>;\n"
+        "BTEMP <9> <-3.8>;\n"
+        "WEA <6> <SO____>;\n"
+        "PRE <11> <-2.5>;\n"
+        "TREND <2> <N/A>;\n"
+        "WS <6> <7.9>;\n"
+        "BFT <6> <0>;\n"
+        "WW <4> <NW>;\n"
+        "HUM <7> <N/A>;\n"
+        "VIS <7> <3.4>;\n"
+        "UVI <5> <-1>;\n"
+        "DEWP <9> <-2.6>;\n"
+        "DAY1 20260919;\n"
         "TEMPH <9> <20.4>;\n"
         "TEMPL <9> <10.8>;\n"
         "MORING_ICON <7> <MO____>;\n"
@@ -248,7 +246,7 @@ static int test_weather_sender(void)
                weather_sender_build_weather_segment(
                    10, &parsed, prefix, sizeof(prefix), actual));
 
-    memcpy(parsed.days[0].records[0].value, "<bad>", sizeof("<bad>"));
+    memcpy(parsed.current[0].value, "<bad>", sizeof("<bad>"));
     ASSERT_INT(WEATHER_SENDER_INVALID_VALUE,
                weather_sender_build_weather_segment(
                    6, &parsed, prefix, sizeof(prefix), actual));
@@ -529,6 +527,19 @@ static int test_weather_session(void)
     ASSERT_TRUE(!weather_session_build_control_frame(
         response, WEATHER_SESSION_CONTROL_PREFIX_CELLS - 1, &fields,
         control_frame));
+
+    {
+        // Captured 2026-10-18: mode 4, UPD 3/8 07:41, flag 1, idle readback.
+        static const uint8_t captured[16] = {
+            0x10, 0x14, 0x10, 0x10, 0x10, 0x10, 0x10, 0x11,
+            0x10, 0x1d, 0x10, 0x17, 0x1a, 0x16, 0x17, 0x14};
+        uint8_t stamp[WEATHER_SESSION_CONTROL_CELLS];
+        uint8_t idle[WEATHER_FRAME_SIZE];
+        memset(idle, 0x10, sizeof(idle));
+        ASSERT_TRUE(weather_session_build_timestamp_frame(
+            idle, sizeof(idle), 4, 3, 8, 7, 41, true, stamp));
+        ASSERT_TRUE(memcmp(stamp, captured, sizeof(captured)) == 0);
+    }
 
     weather_session_state_init(&state);
     ASSERT_INT(WEATHER_SESSION_RETRY_READ,

@@ -50,6 +50,13 @@ bool weather_session_build_control_frame(
     const WeatherSessionControlFields* fields,
     uint8_t frame[WEATHER_SESSION_CONTROL_CELLS]);
 
+// Build the periodic 64-bit frame as decoded from usbwr.exe and traces:
+// mode(3) + UPD month(4)/day(5)/hour(5)/minute(6) + flag(1) at cell 7 bit 7.
+bool weather_session_build_timestamp_frame(
+    const uint8_t* response_cells, size_t response_cell_count, uint8_t mode,
+    uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, bool flag,
+    uint8_t frame[WEATHER_SESSION_CONTROL_CELLS]);
+
 void weather_session_state_init(WeatherSessionState* state);
 
 // Consume one CAL_USB_READ outcome. The caller performs any returned action;

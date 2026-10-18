@@ -54,6 +54,38 @@ bool weather_session_build_control_frame(
         frame, WEATHER_SESSION_CONTROL_CELLS, 64);
 }
 
+bool weather_session_build_timestamp_frame(
+    const uint8_t* response_cells, size_t response_cell_count, uint8_t mode,
+    uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, bool flag,
+    uint8_t frame[WEATHER_SESSION_CONTROL_CELLS])
+{
+    BitPacker packer;
+
+    if (!response_cells || !frame ||
+        response_cell_count < WEATHER_SESSION_CONTROL_PREFIX_CELLS ||
+        mode > 7 || month > 15 || day > 31 || hour > 31 || minute > 63) {
+        return false;
+    }
+
+    for (size_t i = 0; i < WEATHER_SESSION_CONTROL_PREFIX_CELLS; i++) {
+        frame[i] = 0x10 | (response_cells[i] & 0x0f);
+    }
+    frame[1] |= 0x04;
+    memset(frame + WEATHER_SESSION_CONTROL_PREFIX_CELLS, 0x10,
+           WEATHER_SESSION_CONTROL_CELLS - WEATHER_SESSION_CONTROL_PREFIX_CELLS);
+
+    bit_packer_init_at(&packer, frame, WEATHER_SESSION_CONTROL_CELLS, 7, 7);
+    bit_packer_append(&packer, mode, 3);
+    bit_packer_append(&packer, month, 4);
+    bit_packer_append(&packer, day, 5);
+    bit_packer_append(&packer, hour, 5);
+    bit_packer_append(&packer, minute, 6);
+    bit_packer_append(&packer, flag ? 1 : 0, 1);
+
+    return weather_frame_finalize_native_segment(
+        frame, WEATHER_SESSION_CONTROL_CELLS, 64);
+}
+
 void weather_session_state_init(WeatherSessionState* state)
 {
     if (!state) return;

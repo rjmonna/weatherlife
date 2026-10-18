@@ -57,33 +57,6 @@ static bool parse_payload_hex(const char* text, uint8_t payload[WEATHER_FRAME_SI
     return true;
 }
 
-static WeatherFrameNativeSelector6Fields selector6_fixture_test_fields(void)
-{
-    WeatherFrameNativeSelector6Fields fields = {
-        .temperature_high = 6,
-        .temperature_low = 0x1fc,
-        .morning_icon_index = 79,
-        .wind_speed = 9,
-        .beaufort = 2,
-        .weather_word = 0,
-        .afternoon_direction_index = 8,
-        .afternoon_wind_speed = 20,
-        .afternoon_beaufort = 34,
-        .afternoon_weather_word = 0,
-        .afternoon_humidity = 82
-    };
-    return fields;
-}
-
-static void print_selector6_segment(const uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
-{
-    printf("Selector-6 segment (32 nibble cells):");
-    for (size_t i = 0; i < WEATHER_FRAME_NATIVE_SEGMENT_CELLS; i++) {
-        printf(" %02x", frame[i]);
-    }
-    printf("\n");
-}
-
 static bool write_native_segment(USBBackend* backend, USBDevice* device,
                                  const uint8_t* frame, size_t cell_count)
 {
@@ -107,50 +80,6 @@ static bool write_native_segment(USBBackend* backend, USBDevice* device,
     return true;
 }
 
-static bool run_selector6_fixture_test_once(USBBackend* backend,
-                                            USBDevice* device)
-{
-    uint8_t readback[WEATHER_FRAME_SIZE];
-    uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
-    int response_length = 0;
-    WeatherFrameNativeSelector6Fields fields = selector6_fixture_test_fields();
-
-    if (!backend->read_data(device, readback, sizeof(readback),
-                            &response_length) || response_length < 10) {
-        fprintf(stderr, "[-] Prefix read failed or was shorter than ten cells; no write sent\n");
-        return false;
-    }
-    if (!weather_frame_build_native_selector6(readback, (size_t)response_length,
-                                               &fields, frame)) {
-        fprintf(stderr, "[-] Could not build selector-6 fixture test frame; no write sent\n");
-        return false;
-    }
-
-    print_selector6_segment(frame);
-    printf("Icon index 79 and direction index 8 exercise documented unknown-value fallbacks.\n");
-
-    if (!write_native_segment(backend, device, frame,
-                              WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
-        return false;
-    }
-
-    printf("Sent one 128-bit selector-6 segment as two 16-cell writes with 2 ms pacing.\n");
-    for (int poll = 0; poll < 6; poll++) {
-        uint8_t response[WEATHER_FRAME_SIZE];
-        response_length = 0;
-        SLEEP(100);
-        if (!backend->read_data(device, response, sizeof(response),
-                                &response_length)) {
-            fprintf(stderr, "[-] Post-write read poll %d failed\n", poll + 1);
-            return false;
-        }
-        char label[48];
-        snprintf(label, sizeof(label), "Post-write read %d", poll + 1);
-        print_read_response(label, response, response_length);
-    }
-    return true;
-}
-
 static const char* weather_sender_result_text(WeatherSenderResult result)
 {
     switch (result) {
@@ -166,6 +95,26 @@ static const char* weather_sender_result_text(WeatherSenderResult result)
         return "record value or readback prefix is invalid";
     }
     return "invalid sender result";
+}
+
+static char g_upd_line[160];
+
+static void remember_upd_line(const char* text, size_t length)
+{
+    const char* end = text + length;
+    for (const char* line = text; line < end; ) {
+        const char* eol = line;
+        while (eol < end && *eol != '\n' && *eol != '\r') eol++;
+        if (eol - line > 3 && strncmp(line, "UPD", 3) == 0) {
+            size_t n = (size_t)(eol - line);
+            if (n >= sizeof(g_upd_line)) n = sizeof(g_upd_line) - 1;
+            memcpy(g_upd_line, line, n);
+            g_upd_line[n] = '\0';
+            return;
+        }
+        line = eol;
+        while (line < end && (*line == '\n' || *line == '\r')) line++;
+    }
 }
 
 static bool read_weather_file(const char* path, WeatherLegacyResponse* weather)
@@ -198,6 +147,7 @@ static bool read_weather_file(const char* path, WeatherLegacyResponse* weather)
     } else if (!weather_parse_legacy_records(contents, (size_t)file_size, weather)) {
         fprintf(stderr, "[-] Weather file does not match the parsed legacy named-record format\n");
     } else {
+        remember_upd_line(contents, (size_t)file_size);
         parsed = true;
     }
     free(contents);
@@ -272,6 +222,32 @@ static bool run_registration_and_init(USBBackend* backend, USBDevice* device,
     return true;
 }
 
+// usbwr.exe stamps the dongle with the weather file's UPD month/day/hour/minute.
+static bool send_upd_timestamp(USBBackend* backend, USBDevice* device,
+                               const WeatherLegacyResponse* weather)
+{
+    unsigned parts[4] = {0, 0, 0, 0};
+    size_t found = 0;
+    uint8_t idle[WEATHER_FRAME_SIZE];
+    uint8_t stamp[WEATHER_SESSION_CONTROL_CELLS];
+
+    for (const char* p = g_upd_line; *p && found < 5; p++) {
+        if (*p != '<') continue;
+        if (found++ == 0) continue;
+        parts[found - 2] = (unsigned)strtoul(p + 1, NULL, 10);
+    }
+    if (found != 5) return false;
+    memset(idle, 0x10, sizeof(idle));
+    if (!weather_session_build_timestamp_frame(idle, sizeof(idle), 4,
+            (uint8_t)parts[0], (uint8_t)parts[1], (uint8_t)parts[2],
+            (uint8_t)parts[3], true, stamp)) {
+        return false;
+    }
+    printf("Timestamp frame (UPD %02u/%02u %02u:%02u)\n", parts[0], parts[1],
+           parts[2], parts[3]);
+    return write_native_segment(backend, device, stamp, sizeof(stamp));
+}
+
 static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
                                   const WeatherLegacyResponse* weather,
                                   int seconds, const char* reg_code)
@@ -284,11 +260,17 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
     uint8_t last[WEATHER_FRAME_SIZE] = {0};
     bool have_last = false;
     WeatherSessionState session;
+    const int stamp_period_ticks = 58000 / WEATHER_SESSION_POLL_INTERVAL_MS;
 
     weather_session_state_init(&session);
     for (int tick = 0; tick < seconds * 1000 / WEATHER_SESSION_POLL_INTERVAL_MS; tick++) {
         uint8_t response[WEATHER_FRAME_SIZE];
         int length = 0;
+        if (reg_code && tick % stamp_period_ticks == 0 &&
+            !send_upd_timestamp(backend, device, weather)) {
+            fprintf(stderr, "[-] Could not send the UPD timestamp frame\n");
+            return false;
+        }
         bool read_ok = backend->read_data(device, response, sizeof(response),
                                           &length);
         WeatherSessionAction action = weather_session_on_read(&session, read_ok);
@@ -309,6 +291,14 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
                     length);
             return false;
         }
+        bool clean = true;
+        for (int i = 0; i < length; i++) {
+            if ((response[i] & 0xf0) != 0x10) clean = false;
+        }
+        if (!clean) {
+            SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
+            continue;
+        }
         unsigned selector = response[1] & 0x0f;
         bool changed = !have_last || length != last_length ||
                        memcmp(last, response, (size_t)length) != 0;
@@ -324,8 +314,9 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
         for (int i = 0; i < length; i++) {
             if (response[i] != 0x10) idle = false;
         }
-        if (idle) {
-            // usbwr.exe only has branches for request types 1, 6 and 8.
+        // usbwr.exe only has branches for request types 1, 6 and 8; type 0x0b
+        // is the dongle's post-write state and the original ignores it.
+        if (idle || (selector != 1 && selector != 6 && selector != 8)) {
             SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
             continue;
         }
@@ -352,197 +343,6 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
     return true;
 }
 
-// Experimental: register, then write many varied checksum-valid segments
-// (selector 6 icon/temperature sweep, later-day first/second) with a labelled
-// step number so an observer can report which step changed the display.
-static bool run_sweep_writes(USBBackend* backend, USBDevice* device)
-{
-    uint8_t base[WEATHER_FRAME_SIZE];
-    int length = 0;
-    if (!backend->read_data(device, base, sizeof(base), &length) || length < 10) {
-        fprintf(stderr, "[-] Prefix read failed; no write sent\n");
-        return false;
-    }
-
-    uint8_t reg[WEATHER_FRAME_SIZE];
-    WeatherRegistrationId id;
-    srand((unsigned)time(NULL));
-    weather_registration_generate_id(&id);
-    weather_registration_build_frame(&id, reg);
-    if (!backend->write_data(device, reg, sizeof(reg))) {
-        return false;
-    }
-    printf("Step 0: registration sent\n");
-    fflush(stdout);
-    SLEEP(500);
-
-    int step = 0;
-    for (int icon = 0; icon <= 79; icon++) {
-        uint8_t prefix[WEATHER_FRAME_SIZE];
-        uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
-        memcpy(prefix, base, sizeof(prefix));
-        WeatherFrameNativeSelector6Fields f = selector6_fixture_test_fields();
-        f.morning_icon_index = (uint16_t)icon;
-        f.temperature_high = (uint16_t)(icon % 40);
-        f.afternoon_direction_index = (uint16_t)(icon % 8);
-        if (weather_frame_build_native_selector6(prefix, sizeof(prefix), &f, frame)) {
-            printf("Step %d: selector-6 icon=%d temp=%d\n", ++step, icon, f.temperature_high);
-            fflush(stdout);
-            write_native_segment(backend, device, frame,
-                                 WEATHER_FRAME_NATIVE_SEGMENT_CELLS);
-            SLEEP(1200);
-        }
-    }
-
-    for (unsigned sel = 8; sel <= 17; sel++) {
-        uint8_t prefix[WEATHER_FRAME_SIZE];
-        uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
-        memcpy(prefix, base, sizeof(prefix));
-        prefix[1] = (uint8_t)(0x10 | sel);
-        bool ok;
-        if (sel % 2 == 0) {
-            WeatherFrameNativeLaterDayFirstFields f = {
-                .temperature_high = 20, .temperature_low = 10,
-                .morning_icon_index = 3, .wind_speed = 5,
-                .weather_direction_index = 2, .humidity = 50,
-                .afternoon_icon_index = 4, .afternoon_wind_speed = 6,
-                .afternoon_direction_index = 3, .afternoon_humidity = 55,
-                .night_icon_index = 5
-            };
-            ok = weather_frame_build_native_later_day_first(prefix, sizeof(prefix), &f, frame);
-        } else {
-            WeatherFrameNativeLaterDaySecondFields f = {
-                .night_wind_speed = 3, .night_direction_index = 1,
-                .night_humidity = 60, .sunrise_hour = 6, .sunrise_minute = 30,
-                .sunset_hour = 20, .sunset_minute = 15,
-                .precipitation_percent = 40, .rainfall = 2,
-                .sunshine_hours = 8, .uv_index = 5, .dew_point = 12
-            };
-            ok = weather_frame_build_native_later_day_second(prefix, sizeof(prefix), &f, frame);
-        }
-        if (ok) {
-            printf("Step %d: later-day selector %u\n", ++step, sel);
-            fflush(stdout);
-            write_native_segment(backend, device, frame,
-                                 WEATHER_FRAME_NATIVE_SEGMENT_CELLS);
-            SLEEP(1200);
-        }
-    }
-
-    uint8_t resp[WEATHER_FRAME_SIZE];
-    length = 0;
-    if (backend->read_data(device, resp, sizeof(resp), &length)) {
-        print_read_response("Final read", resp, length);
-    }
-    printf("Sweep done\n");
-    return true;
-}
-
-static bool write_retry(USBBackend* backend, USBDevice* device,
-                        const uint8_t* cells, size_t count)
-{
-    for (int attempt = 0; attempt < 3; attempt++) {
-        if (write_native_segment(backend, device, cells, count)) {
-            return true;
-        }
-        SLEEP(20);
-    }
-    return false;
-}
-
-// Experimental fuzzer: registers, then mixes structured segments (random
-// field values over the registration echo prefix) with raw random nibble-cell
-// frames, logging every non-idle response. Observe the display meanwhile.
-static bool run_fuzz_writes(USBBackend* backend, USBDevice* device, int rounds)
-{
-    uint8_t prefix[WEATHER_FRAME_SIZE];
-    int length = 0;
-    srand((unsigned)time(NULL));
-
-    WeatherRegistrationId id;
-    uint8_t reg[WEATHER_FRAME_SIZE];
-    weather_registration_generate_id(&id);
-    weather_registration_build_frame(&id, reg);
-    if (!backend->write_data(device, reg, sizeof(reg))) {
-        return false;
-    }
-    SLEEP(300);
-    if (!backend->read_data(device, prefix, sizeof(prefix), &length) || length < 10) {
-        return false;
-    }
-    print_read_response("Registration echo", prefix, length);
-
-    for (int round = 1; round <= rounds; round++) {
-        uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
-        int mode = rand() % 4;
-        bool ok = false;
-        if (mode == 0) {
-            WeatherFrameNativeSelector6Fields f = {
-                .temperature_high = (uint16_t)(rand() & 0x1ff),
-                .temperature_low = (uint16_t)(rand() & 0x1ff),
-                .morning_icon_index = (uint16_t)(rand() % 80),
-                .wind_speed = (uint16_t)(rand() & 0x7ff),
-                .beaufort = (uint16_t)(rand() & 3),
-                .weather_word = (uint16_t)(rand() & 0xff),
-                .afternoon_direction_index = (uint16_t)(rand() % 9),
-                .afternoon_wind_speed = (uint16_t)(rand() & 0x7f),
-                .afternoon_beaufort = (uint16_t)(rand() & 0xff),
-                .afternoon_weather_word = (uint16_t)(rand() & 0x1f),
-                .afternoon_humidity = (uint16_t)(rand() & 0xff)
-            };
-            ok = weather_frame_build_native_selector6(prefix, (size_t)length, &f, frame);
-        } else if (mode == 1) {
-            uint8_t p[WEATHER_FRAME_SIZE];
-            memcpy(p, prefix, sizeof(p));
-            p[1] = (uint8_t)(0x10 | (rand() & 0x0f));
-            WeatherFrameNativeLaterDayFirstFields f = {
-                .temperature_high = (uint16_t)(rand() & 0x1ff),
-                .temperature_low = (uint16_t)(rand() & 0x1ff),
-                .morning_icon_index = (uint16_t)(rand() % 80),
-                .wind_speed = (uint16_t)(rand() & 0x7ff),
-                .weather_direction_index = (uint16_t)(rand() % 9),
-                .humidity = (uint16_t)(rand() & 0xff),
-                .afternoon_icon_index = (uint16_t)(rand() % 80),
-                .afternoon_wind_speed = (uint16_t)(rand() & 0x7f),
-                .afternoon_direction_index = (uint16_t)(rand() % 9),
-                .afternoon_humidity = (uint16_t)(rand() & 0xff),
-                .night_icon_index = (uint16_t)(rand() % 80)
-            };
-            ok = weather_frame_build_native_later_day_first(p, sizeof(p), &f, frame);
-        } else {
-            for (size_t i = 0; i < sizeof(frame); i++) {
-                frame[i] = (uint8_t)(mode == 2 ? (0x10 | (rand() & 0x0f))
-                                               : (rand() & 0xff));
-            }
-            ok = true;
-        }
-        if (!ok) {
-            continue;
-        }
-        bool sent = write_retry(backend, device, frame, sizeof(frame));
-        printf("Round %d mode %d %s\n", round, mode, sent ? "sent" : "FAILED");
-        fflush(stdout);
-        for (int poll = 0; poll < 4; poll++) {
-            uint8_t resp[WEATHER_FRAME_SIZE];
-            int n = 0;
-            SLEEP(100);
-            if (backend->read_data(device, resp, sizeof(resp), &n) && n >= 16) {
-                for (int i = 0; i < 16; i++) {
-                    if (resp[i] != 0x10) {
-                        char label[48];
-                        snprintf(label, sizeof(label), "  NON-IDLE after round %d", round);
-                        print_read_response(label, resp, n);
-                        memcpy(prefix, resp, sizeof(prefix));
-                        length = n;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    return true;
-}
-
 int main(int argc, char* argv[])
 {
     bool listen_mode = argc > 1 && strcmp(argv[1], "--serve-weather") == 0;
@@ -555,10 +355,6 @@ int main(int argc, char* argv[])
                                    strcmp(argv[1], "--probe-registration-once") == 0;
     bool send_observed_weather_payload_once = argc > 1 &&
         strcmp(argv[1], "--send-observed-weather-payload-once") == 0;
-    bool send_selector6_fixture_test_once = argc > 1 &&
-        strcmp(argv[1], "--send-selector6-fixture-test-once") == 0;
-    bool print_selector6_fixture_test = argc > 1 &&
-        strcmp(argv[1], "--print-selector6-fixture-test") == 0;
     bool print_registration_frame = argc > 1 &&
                                     strcmp(argv[1], "--print-registration-frame") == 0;
     bool print_weather_frame = argc > 1 &&
@@ -572,21 +368,6 @@ int main(int argc, char* argv[])
             return 2;
         }
         if (!read_weather_file(argv[2], &weather)) return 1;
-    }
-
-    if (print_selector6_fixture_test) {
-        uint8_t readback[WEATHER_FRAME_SIZE];
-        uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
-        WeatherFrameNativeSelector6Fields fields = selector6_fixture_test_fields();
-        memset(readback, 0x10, sizeof(readback));
-        if (!weather_frame_build_native_selector6(readback, sizeof(readback),
-                                                   &fields, frame)) {
-            fprintf(stderr, "[-] Could not build selector-6 fixture test frame\n");
-            return 1;
-        }
-        print_selector6_segment(frame);
-        printf("Readback prefix is the observed idle marker state; icon/direction use unknown fallbacks.\n");
-        return 0;
     }
 
     if (print_weather_frame) {
@@ -686,20 +467,6 @@ int main(int argc, char* argv[])
     printf("    Path: %s\n", device.device_path);
     printf("    Timeout: %d ms\n", device.timeout_ms);
 
-    if (argc > 2 && strcmp(argv[1], "--fuzz-writes") == 0) {
-        bool ok = run_fuzz_writes(backend, &device, atoi(argv[2]));
-        usb_close(&device);
-        backend->free_device_list(devices);
-        return ok ? 0 : 1;
-    }
-
-    if (argc > 1 && strcmp(argv[1], "--sweep-writes") == 0) {
-        bool ok = run_sweep_writes(backend, &device);
-        usb_close(&device);
-        backend->free_device_list(devices);
-        return ok ? 0 : 1;
-    }
-
     if (listen_seconds > 0) {
         bool ok = run_listen_and_answer(backend, &device, &weather,
                                         listen_seconds,
@@ -707,13 +474,6 @@ int main(int argc, char* argv[])
         usb_close(&device);
         backend->free_device_list(devices);
         return ok ? 0 : 1;
-    }
-
-    if (send_selector6_fixture_test_once) {
-        bool sent_and_polled = run_selector6_fixture_test_once(backend, &device);
-        usb_close(&device);
-        backend->free_device_list(devices);
-        return sent_and_polled ? 0 : 1;
     }
 
     if (probe_registration_once || send_observed_weather_payload_once) {

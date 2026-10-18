@@ -317,11 +317,15 @@ static bool get_required(const RecordSet* set, const char* key,
     return read_record(set, key, value);
 }
 
-static WeatherSenderResult build_day1(
-    const WeatherLegacyDay* day, const uint8_t* readback,
+// Selector 6 is the current-conditions block. Its slot conversions match the
+// current records TEMP, BTEMP, WEA, PRE, TREND, WS, BFT, WW, HUM, VIS, UVI, DEWP
+// (e.g. PRE 11 bits, TREND 2, WW compass); the field names below keep the
+// earlier DAY1-based labels of WeatherFrameNativeSelector6Fields.
+static WeatherSenderResult build_current(
+    const WeatherLegacyResponse* weather, const uint8_t* readback,
     size_t readback_count, uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
 {
-    RecordSet set = {day->records, day->record_count};
+    RecordSet set = {weather->current, weather->current_record_count};
     char value[WEATHER_RESPONSE_VALUE_SIZE];
     WeatherFrameNativeSelector6Fields fields;
 
@@ -330,23 +334,23 @@ static WeatherSenderResult build_day1(
 #define PARSE_RECORD(key, parser, destination) \
     do { REQUIRE_RECORD(key); if (!(parser)(value, &(destination))) return WEATHER_SENDER_INVALID_VALUE; } while (0)
 
-    PARSE_RECORD("TEMPH", parse_temperature, fields.temperature_high);
-    PARSE_RECORD("TEMPL", parse_truncated_temperature, fields.temperature_low);
-    PARSE_RECORD("MORING_ICON", parse_icon, fields.morning_icon_index);
-    REQUIRE_RECORD("WS");
+    PARSE_RECORD("TEMP", parse_temperature, fields.temperature_high);
+    PARSE_RECORD("BTEMP", parse_truncated_temperature, fields.temperature_low);
+    PARSE_RECORD("WEA", parse_icon, fields.morning_icon_index);
+    REQUIRE_RECORD("PRE");
     if (!parse_integer_bits(value, 11, false, &fields.wind_speed)) return WEATHER_SENDER_INVALID_VALUE;
-    REQUIRE_RECORD("WBFT");
+    REQUIRE_RECORD("TREND");
     if (!parse_integer_bits(value, 2, true, &fields.beaufort)) return WEATHER_SENDER_INVALID_VALUE;
-    REQUIRE_RECORD("WW");
+    REQUIRE_RECORD("WS");
     if (!parse_integer_bits(value, 8, false, &fields.weather_word)) return WEATHER_SENDER_INVALID_VALUE;
+    REQUIRE_RECORD("BFT");
+    PARSE_RECORD("WW", parse_compass, fields.afternoon_direction_index);
     REQUIRE_RECORD("HUM");
-    PARSE_RECORD("AFTERNOON_N", parse_compass, fields.afternoon_direction_index);
-    REQUIRE_RECORD("AFWS");
     if (!parse_integer_bits(value, 7, true, &fields.afternoon_wind_speed)) return WEATHER_SENDER_INVALID_VALUE;
-    PARSE_RECORD("AFBFT", parse_afternoon_beaufort, fields.afternoon_beaufort);
-    REQUIRE_RECORD("AFWW");
+    PARSE_RECORD("VIS", parse_afternoon_beaufort, fields.afternoon_beaufort);
+    REQUIRE_RECORD("UVI");
     if (!parse_integer_bits(value, 5, true, &fields.afternoon_weather_word)) return WEATHER_SENDER_INVALID_VALUE;
-    PARSE_RECORD("AFHUM", parse_signed_humidity, fields.afternoon_humidity);
+    PARSE_RECORD("DEWP", parse_signed_humidity, fields.afternoon_humidity);
 
 #undef REQUIRE_RECORD
 #undef PARSE_RECORD
@@ -500,9 +504,10 @@ WeatherSenderResult weather_sender_build_weather_segment(
                             readback_cell_count, frame);
     }
     if (selector == 6) {
-        day_number = 1;
-    } else if (selector >= 8 && selector <= 17) {
-        day_number = 2 + (selector - 8) / 2;
+        return build_current(weather, readback_cells, readback_cell_count, frame);
+    }
+    if (selector >= 8 && selector <= 17) {
+        day_number = 1 + (selector - 8) / 2;
     } else {
         return WEATHER_SENDER_UNSUPPORTED_SELECTOR;
     }
@@ -514,9 +519,7 @@ WeatherSenderResult weather_sender_build_weather_segment(
     }
     if (!day) return WEATHER_SENDER_MISSING_DAY;
 
-    if (selector == 6) {
-        result = build_day1(day, readback_cells, readback_cell_count, frame);
-    } else if ((selector & 1u) == 0) {
+    if ((selector & 1u) == 0) {
         result = build_later_first(day, readback_cells,
                                    readback_cell_count, frame);
     } else {
