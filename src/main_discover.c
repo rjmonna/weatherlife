@@ -171,9 +171,8 @@ static bool parse_positive_seconds(const char* text, int* seconds)
     return true;
 }
 
-// Respond only to supported forecast requests. Initialization and the
-// selector-1 city exchange remain gated because their complete source data
-// and response contract are not yet decoded.
+// Respond only to decoded weather requests (outer type 6). The outer type-1
+// registration/city exchange and type-8 control path use separate formats.
 // Mirrors usbwr.exe startup: repeat the registration frame every 100 ms until
 // the readback echoes the id, then send the 64-bit init frame whose 8-bit field
 // is the last two hex digits of the reg.dat code ("c48eb" -> 0xeb) and whose
@@ -299,11 +298,22 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
             SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
             continue;
         }
-        unsigned selector = response[1] & 0x0f;
         bool changed = !have_last || length != last_length ||
                        memcmp(last, response, (size_t)length) != 0;
+        WeatherSenderRequest request;
+        if (!weather_sender_decode_request(response, (size_t)length, &request)) {
+            if (changed) {
+                fprintf(stderr, "[-] Readback has invalid request cells; no response sent\n");
+            }
+            SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
+            continue;
+        }
         if (changed) {
-            printf("Device requested selector %u; readback:", selector);
+            printf("Device request type %u", request.request_type);
+            if (request.request_type == 6) {
+                printf(", weather selector %u", request.selector);
+            }
+            printf("; readback:");
             for (int i = 0; i < length; i++) printf(" %02x", response[i]);
             printf("\n");
             memcpy(last, response, (size_t)length);
@@ -314,29 +324,41 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
         for (int i = 0; i < length; i++) {
             if (response[i] != 0x10) idle = false;
         }
-        // usbwr.exe only has branches for request types 1, 6 and 8; type 0x0b
-        // is the dongle's post-write state and the original ignores it.
-        if (idle || (selector != 1 && selector != 6 && selector != 8)) {
+        // Type 1 is the unresolved city exchange; type 8 is a control frame.
+        // Only type 6 dispatches the decoded inner weather selector.
+        if (idle || request.request_type != 6) {
+            SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
+            continue;
+        }
+        if (!weather_sender_request_matches_city(&request, weather)) {
+            if (changed) {
+                fprintf(stderr,
+                        "[-] Weather request city %s does not match the loaded data; "
+                        "no response sent\n",
+                        request.city_code);
+            }
             SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
             continue;
         }
         uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
         WeatherSenderResult result = weather_sender_build_weather_segment(
-            selector, weather, response, (size_t)length, frame);
+            request.selector, weather, response, (size_t)length, frame);
         if (result == WEATHER_SENDER_UNSUPPORTED_SELECTOR) {
             if (changed) {
-                printf("Selector %u is not enabled; no response sent\n", selector);
+                printf("Weather selector %u is not enabled; no response sent\n",
+                       request.selector);
             }
         } else if (result != WEATHER_SENDER_OK) {
-            fprintf(stderr, "[-] Selector %u not answered: %s\n", selector,
+            fprintf(stderr, "[-] Weather selector %u not answered: %s\n",
+                    request.selector,
                     weather_sender_result_text(result));
         } else if (!write_native_segment(
                        backend, device, frame,
                        WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
             return false;
         } else {
-            printf("Answered selector %u with a checksummed forecast segment\n",
-                   selector);
+            printf("Answered weather selector %u with a checksummed segment\n",
+                   request.selector);
         }
         SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
     }

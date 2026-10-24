@@ -18,8 +18,24 @@ typedef enum {
     WEATHER_SENDER_INVALID_VALUE
 } WeatherSenderResult;
 
-// Build a selector-specific weather response from the parsed native named
-// records. The result is a 32-cell segment for selectors 6 and 8..17.
+typedef struct {
+    uint8_t request_type;
+    uint8_t selector;
+    char city_code[6];
+} WeatherSenderRequest;
+
+// Decode the outer request type from cell 1 and the inner selector from
+// cells 7-8 of the native readback.
+bool weather_sender_decode_request(const uint8_t* readback_cells,
+                                   size_t readback_cell_count,
+                                   WeatherSenderRequest* request);
+bool weather_sender_request_matches_city(
+    const WeatherSenderRequest* request,
+    const WeatherLegacyResponse* weather);
+
+// Build a selector-specific response from the parsed native named records.
+// Selectors 0..4 encode city-header responses; selectors 6 and 8..19 encode
+// current conditions and the six forecast days as 32-cell segments.
 WeatherSenderResult weather_sender_build_weather_segment(
     unsigned selector, const WeatherLegacyResponse* weather,
     const uint8_t* readback_cells, size_t readback_cell_count,

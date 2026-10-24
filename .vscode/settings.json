@@ -76,6 +76,10 @@
     "/^meson test -C builddir --print-errorlogs$/": {
       "approve": true,
       "matchCommandLine": true
+    },
+    "/^git status --short && printf '\\\\nCandidate binaries:\\\\n' && find \\. -type f \\\\\\( -iname '\\*\\.dll' -o -iname '\\*\\.exe' -o -iname '\\*\\.pdb' \\\\\\) -print \\| head -100$/": {
+      "approve": true,
+      "matchCommandLine": true
     }
   },
   "python.testing.unittestArgs": [

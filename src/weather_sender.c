@@ -506,7 +506,7 @@ WeatherSenderResult weather_sender_build_weather_segment(
     if (selector == 6) {
         return build_current(weather, readback_cells, readback_cell_count, frame);
     }
-    if (selector >= 8 && selector <= 17) {
+    if (selector >= 8 && selector <= 19) {
         day_number = 1 + (selector - 8) / 2;
     } else {
         return WEATHER_SENDER_UNSUPPORTED_SELECTOR;
@@ -527,4 +527,72 @@ WeatherSenderResult weather_sender_build_weather_segment(
                                     readback_cell_count, frame);
     }
     return result;
+}
+
+bool weather_sender_decode_request(const uint8_t* readback_cells,
+                                   size_t readback_cell_count,
+                                   WeatherSenderRequest* request)
+{
+    if (!readback_cells || !request ||
+        readback_cell_count <= WEATHER_FRAME_NATIVE_SELECTOR6_PREFIX_CELLS - 2) {
+        return false;
+    }
+    if ((readback_cells[1] & 0xf0) != 0x10 ||
+        (readback_cells[7] & 0xf0) != 0x10 ||
+        (readback_cells[8] & 0xf0) != 0x10) {
+        return false;
+    }
+
+    request->request_type = readback_cells[1] & 0x0f;
+    request->selector = (uint8_t)(((readback_cells[7] & 0x03) << 4) |
+                                  (readback_cells[8] & 0x0f));
+    request->city_code[0] = '\0';
+    if (request->request_type == 6) {
+        for (size_t i = 0; i < 5; i++) {
+            uint8_t digit = readback_cells[i + 2] & 0x0f;
+            if ((readback_cells[i + 2] & 0xf0) != 0x10 || digit > 9) {
+                return false;
+            }
+            request->city_code[i] = (char)('0' + digit);
+        }
+        request->city_code[5] = '\0';
+    }
+    return true;
+}
+
+bool weather_sender_request_matches_city(
+    const WeatherSenderRequest* request,
+    const WeatherLegacyResponse* weather)
+{
+    const WeatherLegacyRecord* record = NULL;
+    const char* value;
+    const char* first_separator;
+    const char* second_separator;
+    const char* code;
+
+    if (!request || !weather || request->request_type != 6 ||
+        request->city_code[5] != '\0') {
+        return false;
+    }
+    for (size_t i = 0; i < 5; i++) {
+        if (!isdigit((unsigned char)request->city_code[i])) return false;
+    }
+    for (size_t i = 0; i < weather->current_record_count; i++) {
+        if (strcmp(weather->current[i].key, "CITY_AND_WMO") == 0) {
+            record = &weather->current[i];
+            break;
+        }
+    }
+    value = value_text(record);
+    if (!value ||
+        !(first_separator = strchr(value, ';')) ||
+        !(second_separator = strchr(first_separator + 1, ';'))) {
+        return false;
+    }
+    code = second_separator + 1;
+    for (size_t i = 0; i < 5; i++) {
+        if (!isdigit((unsigned char)code[i])) return false;
+    }
+    if (code[5] != '\0' && code[5] != ';' && code[5] != '>') return false;
+    return memcmp(request->city_code, code, 5) == 0;
 }
