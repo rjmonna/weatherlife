@@ -1945,3 +1945,14 @@ one. All writes succeeded and the registration acknowledgment matched, but
 every readback stayed idle (the only non-idle readback was the dongle echoing
 the timestamp frame). LCD acceptance is unconfirmed. The fixture's UPD
 timestamp is from 2010 (03/08), which may be why the display ignores it.
+
+### Sustained Unsolicited Send (2026-10-24)
+
+`WEATHER_SEND_CYCLES=N` repeats the Day 1-6 send every ~11 s (timestamp every
+6 cycles). In a 20-cycle run, 11 cycles were written before a second-chunk
+write failed. The only non-idle readback was `0b 80 19 1e 1c 10 11 11 18 13 1c
+10 10 12 1b 1b` right after the second timestamp frame (high nibbles are not
+`1`, so it is not a valid request; the original ignores it). A repeat run hit
+the same second-chunk write failure in cycle 1, so the HID write path is
+intermittently refused while the dongle is busy. The user observed no LCD
+change.

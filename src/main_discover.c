@@ -68,7 +68,12 @@ static bool write_native_segment(USBBackend* backend, USBDevice* device,
     }
 
     for (size_t offset = 0; offset < cell_count; offset += chunk_size) {
-        if (!backend->write_data(device, frame + offset, (int)chunk_size)) {
+        bool written = false;
+        for (int attempt = 0; attempt < 5 && !written; attempt++) {
+            written = backend->write_data(device, frame + offset, (int)chunk_size);
+            if (!written) SLEEP(20);
+        }
+        if (!written) {
             fprintf(stderr, "[-] Native payload chunk at cell %zu failed; segment may be partial\n",
                     offset);
             return false;
@@ -375,13 +380,15 @@ static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
     return true;
 }
 
-// Explicitly authorized, bounded one-shot send: selector 6 then 8, 10, ..., 16
-// (Days 1-6), reading the device back before and after each write.
+// Explicitly authorized, bounded send: header selectors 0-4, Day 1 (6) and
+// the paired Day 2-6 selectors 8-17, reading the device back before and after each write.
 static bool run_unsolicited_send(USBBackend* backend, USBDevice* device,
                                  const WeatherLegacyResponse* weather,
-                                 const char* city_code, const char* reg_code)
+                                 const char* city_code, const char* reg_code,
+                                 int cycles)
 {
-    const unsigned selectors[] = {6, 8, 10, 12, 14, 16};
+    const unsigned selectors[] = {0, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13,
+                                  14, 15, 16, 17};
 
     if (strlen(city_code) != 5 || strspn(city_code, "0123456789") != 5) {
         fprintf(stderr, "[-] City code must be five digits\n");
@@ -397,46 +404,55 @@ static bool run_unsolicited_send(USBBackend* backend, USBDevice* device,
         return false;
     }
     SLEEP(WEATHER_SESSION_POLL_INTERVAL_MS);
-    for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
-        uint8_t response[WEATHER_FRAME_SIZE];
-        uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
-        int length = 0;
+    for (int cycle = 0; cycle < cycles; cycle++) {
+        if (cycle > 0 && reg_code && cycle % 6 == 0 &&
+            !send_upd_timestamp(backend, device, weather, true)) {
+            return false;
+        }
+        for (size_t i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
+            uint8_t response[WEATHER_FRAME_SIZE];
+            uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
+            uint8_t request[WEATHER_FRAME_SIZE];
+            int length = 0;
+            bool read_ok = false;
 
-        bool read_ok = false;
-        for (int attempt = 0; attempt < 5 && !read_ok; attempt++) {
-            read_ok = backend->read_data(device, response, sizeof(response), &length);
-            if (!read_ok) SLEEP(500);
+            for (int attempt = 0; attempt < 5 && !read_ok; attempt++) {
+                read_ok = backend->read_data(device, response, sizeof(response), &length);
+                if (!read_ok) SLEEP(500);
+            }
+            if (!read_ok) {
+                fprintf(stderr, "[-] Readback failed; stopping\n");
+                return false;
+            }
+            for (int c = 0; c < length; c++) {
+                if (response[c] != 0x10) {
+                    print_read_response("Non-idle readback", response, length);
+                    break;
+                }
+            }
+            // The dongle sent no request, so synthesize the type-6 request
+            // prefix that the sender normally echoes from the readback.
+            memset(request, 0x10, sizeof(request));
+            request[1] = 0x16;
+            for (int d = 0; d < 5; d++) request[2 + d] = (uint8_t)(0x10 | (city_code[d] - '0'));
+            request[7] = (uint8_t)(0x10 | (selectors[i] >> 4));
+            request[8] = (uint8_t)(0x10 | (selectors[i] & 0x0f));
+            WeatherSenderResult result = weather_sender_build_weather_segment(
+                selectors[i], weather, request, sizeof(request), frame);
+            if (result != WEATHER_SENDER_OK) {
+                fprintf(stderr, "[-] Selector %u not built: %s\n", selectors[i],
+                        weather_sender_result_text(result));
+                return false;
+            }
+            if (!write_native_segment(backend, device, frame,
+                                      WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
+                return false;
+            }
+            SLEEP(500);
         }
-        if (!read_ok) {
-            fprintf(stderr, "[-] Readback failed; stopping\n");
-            return false;
-        }
-        print_read_response("Readback before write", response, length);
-        // The dongle sent no request, so synthesize the type-6 request prefix
-        // that the sender normally echoes from the readback.
-        uint8_t request[WEATHER_FRAME_SIZE];
-        memset(request, 0x10, sizeof(request));
-        request[1] = 0x16;
-        for (int d = 0; d < 5; d++) request[2 + d] = (uint8_t)(0x10 | (city_code[d] - '0'));
-        request[7] = (uint8_t)(0x10 | (selectors[i] >> 4));
-        request[8] = (uint8_t)(0x10 | (selectors[i] & 0x0f));
-        WeatherSenderResult result = weather_sender_build_weather_segment(
-            selectors[i], weather, request, sizeof(request), frame);
-        if (result != WEATHER_SENDER_OK) {
-            fprintf(stderr, "[-] Selector %u not built: %s\n", selectors[i],
-                    weather_sender_result_text(result));
-            return false;
-        }
-        if (!write_native_segment(backend, device, frame,
-                                  WEATHER_FRAME_NATIVE_SEGMENT_CELLS)) {
-            return false;
-        }
-        printf("Wrote selector %u segment\n", selectors[i]);
-        SLEEP(500);
-        if (backend->read_data(device, response, sizeof(response), &length)) {
-            print_read_response("Readback after write", response, length);
-        }
-        SLEEP(1500);
+        printf("Cycle %d: wrote selectors 0-4, 6, 8-17\n", cycle + 1);
+        fflush(stdout);
+        SLEEP(8000);
     }
     return true;
 }
@@ -576,7 +592,7 @@ int main(int argc, char* argv[])
         WeatherLegacyResponse data;
         bool ok = read_weather_file(argv[2], &data) &&
                   run_unsolicited_send(backend, &device, &data, argv[3],
-                                       argc == 5 ? argv[4] : NULL);
+                                       argc == 5 ? argv[4] : NULL, getenv("WEATHER_SEND_CYCLES") ? atoi(getenv("WEATHER_SEND_CYCLES")) : 1);
         usb_close(&device);
         backend->free_device_list(devices);
         return ok ? 0 : 1;
