@@ -130,6 +130,7 @@ static int test_response_parser(void)
 static int test_weather_sender(void)
 {
     const char response[] =
+        "Netherlands;Rotterdam\r\n"
         "CITY_AND_WMO <Netherlands;Rotterdam;06344>;\n"
         "TEMP <9> <6.9>;\n"
         "BTEMP <9> <-3.8>;\n"
@@ -169,22 +170,24 @@ static int test_weather_sender(void)
         "UVI <5> <4>;\n"
         "DEWP <8> <N/A>;\n";
     WeatherLegacyResponse parsed;
+    WeatherLegacyResponse invalid_weather;
+    WeatherLegacyResponse missing_day_weather;
     WeatherSenderRequest request;
     uint8_t prefix[WEATHER_FRAME_SIZE];
     uint8_t actual[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
     uint8_t expected[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
     WeatherFrameNativeSelector6Fields selector6 = {
-        .temperature_high = 7,
-        .temperature_low = (uint16_t)-3 & 0x1ff,
+        .temperature_high = 20,
+        .temperature_low = 10,
         .morning_icon_index = 0,
-        .wind_speed = (uint16_t)-2 & 0x7ff,
-        .beaufort = 3,
-        .weather_word = 7,
-        .afternoon_direction_index = 1,
+        .wind_speed = 6,
+        .beaufort = 0,
+        .weather_word = 0,
+        .afternoon_direction_index = 8,
         .afternoon_wind_speed = 0x7f,
-        .afternoon_beaufort = 34,
-        .afternoon_weather_word = 0x1f,
-        .afternoon_humidity = 0x83
+        .afternoon_beaufort = 0,
+        .afternoon_weather_word = 0,
+        .afternoon_humidity = 45
     };
     WeatherFrameNativeLaterDayFirstFields day2_first = {
         .temperature_high = 20,
@@ -254,25 +257,39 @@ static int test_weather_sender(void)
         prefix, sizeof(prefix), &selector6, expected));
     ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
 
+    missing_day_weather = parsed;
+    missing_day_weather.days[0].day_number = 2;
+    ASSERT_INT(WEATHER_SENDER_MISSING_DAY,
+               weather_sender_build_weather_segment(
+                   6, &missing_day_weather, prefix, sizeof(prefix), actual));
+
+    WeatherLegacyResponse day2_weather = parsed;
+    day2_weather.days[0].day_number = 2;
     ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
-        8, &parsed, prefix, sizeof(prefix), actual));
+        8, &day2_weather, prefix, sizeof(prefix), actual));
     ASSERT_TRUE(weather_frame_build_native_later_day_first(
         prefix, sizeof(prefix), &day2_first, expected));
     ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
 
     ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
-        9, &parsed, prefix, sizeof(prefix), actual));
+        9, &day2_weather, prefix, sizeof(prefix), actual));
     ASSERT_TRUE(weather_frame_build_native_later_day_second(
         prefix, sizeof(prefix), &day2_second, expected));
     ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
 
-    for (unsigned selector = 8; selector <= 19; selector++) {
-        WeatherLegacyResponse selector_weather = parsed;
+    for (unsigned selector = 8; selector <= 17; selector++) {
+        WeatherLegacyResponse selector_weather = day2_weather;
         selector_weather.days[0].day_number =
-            (int)(1 + (selector - 8) / 2);
+            (int)(2 + (selector - 8) / 2);
         ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
             selector, &selector_weather, prefix, sizeof(prefix), actual));
     }
+    ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+               weather_sender_build_weather_segment(
+                   18, &parsed, prefix, sizeof(prefix), actual));
+    ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+               weather_sender_build_weather_segment(
+                   19, &parsed, prefix, sizeof(prefix), actual));
 
     ASSERT_INT(WEATHER_SENDER_OK,
                weather_sender_build_weather_segment(
@@ -287,10 +304,11 @@ static int test_weather_sender(void)
                weather_sender_build_weather_segment(
                    10, &parsed, prefix, sizeof(prefix), actual));
 
-    memcpy(parsed.current[1].value, "<bad>", sizeof("<bad>"));
+    invalid_weather = parsed;
+    memcpy(invalid_weather.days[0].records[0].value, "<bad>", sizeof("<bad>"));
     ASSERT_INT(WEATHER_SENDER_INVALID_VALUE,
                weather_sender_build_weather_segment(
-                   6, &parsed, prefix, sizeof(prefix), actual));
+                   6, &invalid_weather, prefix, sizeof(prefix), actual));
     ASSERT_INT(WEATHER_SENDER_INVALID_VALUE,
                weather_sender_build_weather_segment(
                    6, &parsed, prefix,

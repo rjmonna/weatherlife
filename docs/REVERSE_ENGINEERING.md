@@ -1892,7 +1892,7 @@ Check: the startup frame `10 14 10 10 10 10 10 11 10 1d 10 17 1a 16 17 14` unpac
 
 Consequences:
 - This frame carries no temperature, icon, or forecast data. It tells the dongle when the host data was last refreshed. The earlier "controlled TEMP / Day-1 TEMPH changes alter the first weather payload" conclusion is not supported: the changing cells were the 3-bit mode prefix (observed values 4,5,6,7 and 1,2) and its checksum, which vary with the text-derived setting and flag rather than with the weather records. Treat that earlier proof as retracted until a type 1/6/8 write is captured.
-- Actual weather content (selector 6 current conditions, selectors 8..19 forecast pairs) is sent only in reply to outer request type 6. No such request has been observed on hardware since registration. Outer type 1 is the separate city/registration response, and outer type 8 is the control/timestamp path.
+- Actual weather content (selector 6 Day 1, selectors 8..17 Days 2..6) is sent only in reply to outer request type 6. No such request has been observed on hardware since registration. Outer type 1 is the separate city/registration response, and outer type 8 is the control/timestamp path.
 - Display model (user report: cloud/weather symbols, fixed temperature segments, five fixed forecast slots) fits the selector layouts: the Day-1 block carries `TEMPH/TEMPL` (9 bits each), a 7-bit morning icon and a 5-bit afternoon icon (79 icon names), plus wind/BFT/WW/HUM; later days use paired blocks. Which slot each selector fills on the LCD remains unobserved.
 
 ### Simulated Weather Update (2026-10-18)
@@ -1913,23 +1913,13 @@ Tallying cell 0/cell 1 of every `HidD_GetFeature` readback in all 23 traces (abo
 
 Selector 6 (Day 1) is still rejected for real data: `build_day1` parses `WW` and `AFWW` as integers and `AFTERNOON_N` as a compass, but the archive and generated files carry compass letters in `WW`/`AFWW` and an icon name in `AFTERNOON_N` (the later-day builders use compass/icon respectively). Replacing the two compass tokens with `0` makes selector 6 send. Either the Day-1 slot-to-field mapping in `docs` above is mis-assigned or the original converts text with an atoi-like fallback; this needs a `FUN_0040b9d0` call-site check before changing the builder.
 
-### Correction: Selector 6 Is the Current-Conditions Block; Selectors 8..17 Are DAY1..DAY5 (2026-10-18)
+### Superseded inference: Selector 6 Is the Current-Conditions Block (2026-10-18)
 
-Re-reading the selector-6 slot table against the archived records resolves the Day-1 rejection. Its slot widths/conversions are 9 temperature, 9 temperature, 7 icon, 11 integer (`.` discarded), 2 sentinel integer, 8 integer, 0 consumed, 5 compass, 7 sentinel integer, 8 `int*10+suffix`, 5 sentinel integer, 8 signed-humidity. These match the *current* records in order, not DAY1:
+The earlier field-name comparison inferred that selector 6 serialized current conditions. That inference was incorrect: matching field widths and conversions alone did not identify the selected record group.
 
-| Slot | Current record | Evidence |
-| ---: | --- | --- |
-| 0 / 1 | `TEMP` / `BTEMP` | 9-bit temperatures; `N/A` -> `0xff` (BTEMP is `N/A` in the archive) |
-| 2 | `WEA` | 79-name icon index |
-| 3 | `PRE` | 11 bits, `1030.8` -> 1030 (hPa) |
-| 4 | `TREND` | 2 bits |
-| 5 / 6 | `WS` / `BFT` | integer / consumed (0 bits) |
-| 7 | `WW` | compass index (the archive holds `N`, `NO`, `NW`) |
-| 8 | `HUM` | 7 bits |
-| 9 | `VIS` | `int*10+suffix`, clamped to 254 |
-| 10 / 11 | `UVI` / `DEWP` | 5-bit sentinel integer / signed 8-bit |
+The native selector tables resolve the mapping: `local_638[6] = 1`, `local_638[8] = 2`, and the even/odd selector pairs continue through `[18] = 7`. `FUN_0040d850` skips that many blank-separated weather groups. The stream has the current group first, followed by `DAY1`, so selector 6 starts at `DAY1`; selectors 8/9 start at `DAY2`, and selectors 16/17 at `DAY6`. Selectors 18/19 would address a seventh day, which the parsed archive contract does not provide.
 
-The previously labelled "unresolved current-condition group" and the experimental `weather_frame_build` input (current temperature, background temperature, pressure trend, visibility, UV, dew point) agree with this. Consequently the pair `8/9` encodes DAY1, `10/11` DAY2, ... `16/17` DAY5, and `18/19` DAY6. `weather_sender.c` implements this mapping (`build_current`, `day = 1 + (selector - 8) / 2`) and the native tests cover all six day pairs. Earlier statements in this file that call selector 6 the Day-1 block or selectors 8..17 days 2-6 predate this correction. `BTEMP` is parsed from the file text; the original's computed value (`FUN_00412e60`) is not reproduced. A simulated update with Open-Meteo data (selectors 6, 8..17) was accepted by the dongle with idle readbacks; LCD effect unobserved.
+The selector-6 switch consumes the Day-1 records in the order and widths documented in “Selector-6 Day-1 Field Layout.” In particular, the Day-1 `WW` and `AFWW` fields use the executable's integer-prefix conversion (nonnumeric values become zero), while `AFTERNOON_N` uses the eight-entry alias lookup. The prior tests and sender mapped selector 6 to current records and mapped selectors 8..19 one day too early; both have now been corrected. `TEMPL` is still converted from its record value with truncation toward zero; the separate `FUN_00412fb0` derived-temperature calculation has not been proven to feed this wire field. No type-6 request has been observed on hardware, so live LCD acceptance remains unverified.
 
 ### Removed Unproven Write Experiments (2026-10-18)
 
@@ -1941,6 +1931,17 @@ The `FUN_00401400` readback dispatcher has two distinct selector levels:
 
 - The outer request type is `cell[1] & 0x0f`. Type 1 enters a separate city/registration response path; type 6 enters the weather-data path; type 8 enters a control/timestamp path. Type 8 is not weather selector 8.
 - Within outer type 6, the weather selector is assembled from readback cells 7 and 8: `((cell[7] & 0x03) << 4) | (cell[8] & 0x0f)`. The handler also reads the requested five-digit city code from cells 2..6.
-- The native selector switch includes header selectors 0..4, selector 6, and paired forecast selectors 8..19. Even selectors 8, 10, 12, 14, 16, 18 use the first daily record group; the following odd selector uses its second group. Thus 18/19 are Day 6, despite the LCD observations showing five fixed forecast slots.
+- The native selector switch includes header selectors 0..4, selector 6, and paired forecast selectors 8..19. Selector 6 starts at Day 1; pairs 8/9 through 16/17 cover Days 2..6. Although selectors 18/19 have compiled Day-7 branches, the native response parser and archived data contract stop at Day 6, so the replacement does not serve them.
 
-`--serve-weather` now decodes those separate fields, verifies that a type-6 request's five-digit city code matches the loaded `CITY_AND_WMO` record, dispatches supported weather layouts only for outer type 6, and includes the Day-6 pair. It does not answer outer types 1 or 8 with a weather segment. This fixes the earlier mistaken dispatch of outer type 8 as forecast selector 8. The native registration/favorite-city lookup and date-based scheduling are not fully replicated, and no outer type-6 request has been observed in hardware traces; therefore this path is source-derived but not live-verified. Do not infer LCD acceptance from a successful HID write.
+`--serve-weather` decodes those separate fields, verifies that a type-6 request's five-digit city code matches the loaded `CITY_AND_WMO` record, and dispatches supported weather layouts only for outer type 6. It answers selector 6 with Day 1 and selectors 8..17 with Days 2..6; selector 18/19, outer type 1, and outer type 8 do not use these weather segments. The native registration/favorite-city lookup and date-based scheduling are not fully replicated, and no outer type-6 request has been observed in hardware traces; therefore this path is source-derived but not live-verified. Do not infer LCD acceptance from a successful HID write.
+
+## Unsolicited Day 1-6 Send (2026-10-24)
+
+`--send-weather-unsolicited <weather.dat> <city-code> [reg-code]` registers,
+sends the init frame (field from the last two hex digits of the `reg.dat`
+code) and the UPD timestamp frame, then writes selectors 6, 8, 10, 12, 14 and
+16 using a synthesized type-6 request prefix, since the dongle never issues
+one. All writes succeeded and the registration acknowledgment matched, but
+every readback stayed idle (the only non-idle readback was the dongle echoing
+the timestamp frame). LCD acceptance is unconfirmed. The fixture's UPD
+timestamp is from 2010 (03/08), which may be why the display ignores it.

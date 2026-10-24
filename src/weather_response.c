@@ -127,6 +127,15 @@ bool weather_parse_legacy_records(const char* response, size_t response_length,
             continue;
         }
 
+        if (parsed->current_record_count == 0 && parsed->day_count == 0 &&
+            !strchr(trimmed, '<') && !strchr(trimmed, '>')) {
+            const char* separator = strchr(trimmed, ';');
+            if (separator && !strchr(separator + 1, ';')) {
+                cursor = line_end ? line_end + 1 : end;
+                continue;
+            }
+        }
+
         if (strncmp(trimmed, "DAY", 3) == 0) {
             WeatherLegacyDay* day;
             if (parsed->day_count >= WEATHER_RESPONSE_MAX_DAYS ||

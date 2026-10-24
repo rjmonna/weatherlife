@@ -34,8 +34,8 @@ bool weather_sender_request_matches_city(
     const WeatherLegacyResponse* weather);
 
 // Build a selector-specific response from the parsed native named records.
-// Selectors 0..4 encode city-header responses; selectors 6 and 8..19 encode
-// current conditions and the six forecast days as 32-cell segments.
+// Selectors 0..4 encode city-header responses; selector 6 encodes Day 1 and
+// selectors 8..17 encode the paired forecast fields for Days 2..6.
 WeatherSenderResult weather_sender_build_weather_segment(
     unsigned selector, const WeatherLegacyResponse* weather,
     const uint8_t* readback_cells, size_t readback_cell_count,

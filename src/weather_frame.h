@@ -1,8 +1,8 @@
 // Weather-frame primitives and offline builders. The original serializer
 // stores one data nibble per byte; its 128-bit primary segment is 32 cells,
-// sent as two 16-byte CAL_USB_WRITE reports. The selector-6 builder reaches
-// the proven cell layout/checksum but requires preconverted field values and
-// does not imply that the complete display protocol is understood.
+// sent as two 16-byte CAL_USB_WRITE reports. The selector-6 Day-1 builder
+// reaches the proven cell layout/checksum but requires preconverted field
+// values and does not imply that the complete display protocol is understood.
 
 #ifndef WEATHER_LIFE_WEATHER_FRAME_H
 #define WEATHER_LIFE_WEATHER_FRAME_H
@@ -73,9 +73,10 @@ typedef struct {
     uint16_t afternoon_humidity;
 } WeatherFrameNativeSelector6Fields;
 
-// Append the proven 79-bit selector-6 field sequence at its native cursor.
-// Values must already use the original per-field conversions; excess high bits
-// are discarded as in the native bit appender. HUM is consumed but has no field.
+// Append the proven 79-bit selector-6 Day-1 field sequence at its native
+// cursor. Values must already use the original per-field conversions; excess
+// high bits are discarded as in the native bit appender. HUM is consumed but
+// has no field.
 bool weather_frame_append_native_selector6_fields(
     BitPacker* packer, const WeatherFrameNativeSelector6Fields* fields);
 
@@ -90,8 +91,8 @@ bool weather_frame_finalize_native_selector6(
 bool weather_frame_finalize_native_segment(
     uint8_t* frame, size_t cell_count, size_t segment_bit_length);
 
-// Build a complete checksummed selector-6 segment from readback cells and
-// already-converted field values. This does not infer any unknown conversions.
+// Build a complete checksummed selector-6 Day-1 segment from readback cells
+// and already-converted field values. This does not infer unknown conversions.
 bool weather_frame_build_native_selector6(
     const uint8_t* readback_cells, size_t readback_size,
     const WeatherFrameNativeSelector6Fields* fields,
