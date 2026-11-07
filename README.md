@@ -18,7 +18,7 @@ Convert Weather-Life (defunct weather dongle software from weather-life.com) int
 ### Hardware Identified
 - **Device Interface**: Tenx composite HID (VID: `0x1130`, PID: `0x0202`)
 - **Required HID interfaces**: Usage Page `1`, Usage `0` and Usage `3`
-- **Display Type**: Likely 16x2 character LCD via USB HID
+- **Display**: Custom segmented LCD with weather symbols, segmented date/time, and forecast slots (user-reported; dimensions and protocol mapping are unverified)
 - **Communication Protocol**: Custom binary USB protocol (CAL_USB_READ/WRITE/STATUS)
 
 ### Files & Analysis Complete
@@ -87,6 +87,9 @@ sudo ./weather-life-discover
 
 Run `./weather-life-discover --help` to list options without accessing the
 device. Running it with no option performs the default device diagnostic.
+`--send-current-timestamp-once` sends one confirmed timestamp/control frame
+only when the device's current readback is idle; it may update the dongle's
+stored time, but does not send weather data.
 The experimental `--serve-weather` mode currently does not answer weather
 requests because the device-ID/city-slot mapping is unresolved; if a
 registration code is provided, it still sends registration, initialization,
@@ -202,12 +205,11 @@ python -m http.server 8765 --bind 127.0.0.1 --directory C:\Users\rmonn\OneDrive\
 [Wind Speed (2 bytes)] [Wind Direction (2 bytes)]
 ```
 
-### Display Format
-Assuming 16x2 character LCD:
-```
-Line 1: "NYC        72 F"
-Line 2: "Cloudy   RH 65%"
-```
+### Display Rendering
+
+The physical display is reported to be a custom segmented LCD showing weather
+symbols, date/time, and forecast slots. Its exact layout and the mapping from
+transmitted fields to visible elements have not been verified.
 
 ## 🌐 Weather Data Source
 
@@ -308,7 +310,7 @@ make
   - Microchip USB Bridge
   - FTDI FT232R
 - **USB Cable** (Type A to whatever your dongle has)
-- **LCD Display** (16x2 or 20x4 character display connected to device)
+- Weather-Life display hardware
 - **Weather API Key** (optional - Open-Meteo is FREE!)
 
 ### To Build the Code

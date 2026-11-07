@@ -25,6 +25,7 @@ class DiscoverCliTests(unittest.TestCase):
             ("--unknown",),
             ("--help", "extra"),
             ("--read-once", "extra"),
+            ("--send-current-timestamp-once", "extra"),
             ("--probe-registration-once", "extra"),
             ("--send-observed-weather-payload-once",),
             ("--serve-weather",),

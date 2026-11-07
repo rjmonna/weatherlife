@@ -21,8 +21,8 @@
 #define WEATHER_FRAME_NATIVE_HEADER_VALUES 10
 
 // Experimental: selectors 0-4 pack ten 8-bit values (usbwr.exe FUN_00401400).
-// The LCD has no text segments, so their meaning is unproven; callers pass
-// neutral values only to let the dongle's request sequence advance.
+// The display meaning is unproven; callers pass neutral values only to let the
+// dongle's request sequence advance.
 bool weather_frame_build_native_header(
     const uint8_t* readback_cells, size_t readback_size,
     const uint8_t values[WEATHER_FRAME_NATIVE_HEADER_VALUES],

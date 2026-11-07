@@ -413,6 +413,32 @@ static int test_weather_sender(void)
     for (size_t i = 0; i < sizeof(actual); i++) {
         ASSERT_INT(0xa5, actual[i]);
     }
+    for (size_t city_length = 39; city_length <= 41; city_length++) {
+        char city_value[WEATHER_RESPONSE_VALUE_SIZE];
+        uint8_t long_header[WEATHER_FRAME_NATIVE_HEADER_VALUES];
+
+        invalid_weather = parsed;
+        memcpy(city_value, "<12345;", 7);
+        memset(city_value + 7, 'a', city_length);
+        memcpy(city_value + 7 + city_length, ";END>", sizeof(";END>"));
+        ASSERT_TRUE(set_record_value(invalid_weather.current,
+                                     invalid_weather.current_record_count,
+                                     "CITY_AND_WMO", city_value));
+        memset(long_header, 'A', sizeof(long_header));
+        ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+            3, &invalid_weather, prefix, sizeof(prefix), actual));
+        ASSERT_TRUE(weather_frame_build_native_header(
+            prefix, sizeof(prefix), long_header, expected));
+        ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
+
+        memset(actual, 0xa5, sizeof(actual));
+        ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+                   weather_sender_build_weather_segment(
+                       4, &invalid_weather, prefix, sizeof(prefix), actual));
+        for (size_t i = 0; i < sizeof(actual); i++) {
+            ASSERT_INT(0xa5, actual[i]);
+        }
+    }
     invalid_weather = parsed;
     ASSERT_TRUE(set_record_value(invalid_weather.current,
                                  invalid_weather.current_record_count,

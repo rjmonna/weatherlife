@@ -42,15 +42,39 @@ mechanics stop at the 16-byte HID output reports described above. The
 replacement therefore keeps general weather transmission refused instead of
 inventing an LCD encoding or treating `WriteFile` success as rendering.
 
-### Observed physical display layout (2026-10-10)
+### Observed custom segmented display (2026-10-10)
 
-The user reports a custom LCD with weather symbols, segmented date and time,
+The user reports a custom segmented LCD with weather symbols, date and time,
 and a fixed view of approximately five forecast days.
 This is useful hardware evidence for the display model, but it does not yet
 map the visible slots to selectors or prove whether the native Day1--Day6
 source range is all displayed simultaneously, rotated, or partially unused.
 The existing `WEATHER_FRAME_FORECAST_DAYS` value of five means today plus four
 forecast entries in the replacement data model; it is not a protocol proof.
+
+### Read-only device probe (2026-11-07)
+
+On Linux, `weather-life-discover --read-once` found and opened the Tenx HID
+device at `/dev/hidraw2`. The confirmed read poll returned 16 bytes, all
+`0x10`. This confirms that the host can communicate with the device and that
+the readback was idle for this probe; it does not establish segment mappings,
+weather acceptance, or a visible LCD update. No guessed display payload was
+sent.
+
+After explicit authorization, the exact 16-byte weather payload previously
+captured from the original application's `CAL_USB_WRITE` path was replayed
+once. The baseline and immediate follow-up reads both returned sixteen
+`0x10` cells. The write was accepted by the host transport, but no device-side
+acknowledgment or LCD change was established.
+
+After separate authorization, `--send-current-timestamp-once` sent one
+confirmed native 64-bit timestamp/control segment, using the host's local
+date/time and only after an all-`0x10` baseline. The immediate readback was
+`10 1b 18 10 10 10 10 11 12 1c 1f 16 14 1e 10 18`; subsequent read-only
+polls returned the same cells. This is a device response transition associated
+with the write, but its meaning and any visible LCD effect are unconfirmed.
+The user observed no daily or weekly forecast update after this probe. The
+option is one-shot and does not send weather data.
 
 The user additionally reports that, after an action from the tray icon, the
 application appeared to send current conditions plus five days of weather over

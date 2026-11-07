@@ -247,6 +247,56 @@ static bool send_upd_timestamp(USBBackend* backend, USBDevice* device,
     return write_native_segment(backend, device, stamp, sizeof(stamp));
 }
 
+static bool send_current_timestamp_once(USBBackend* backend, USBDevice* device)
+{
+    uint8_t response[WEATHER_FRAME_SIZE];
+    uint8_t frame[WEATHER_SESSION_CONTROL_CELLS];
+    int response_length = 0;
+    time_t now;
+    struct tm* local_time;
+
+    if (!backend->read_data(device, response, sizeof(response),
+                            &response_length)) {
+        fprintf(stderr, "[-] Baseline read failed; no timestamp sent\n");
+        return false;
+    }
+    if (response_length != WEATHER_FRAME_SIZE) {
+        fprintf(stderr, "[-] Expected a 16-byte idle readback; no timestamp sent\n");
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(response); i++) {
+        if (response[i] != 0x10) {
+            fprintf(stderr, "[-] Device is not idle; no timestamp sent\n");
+            return false;
+        }
+    }
+
+    now = time(NULL);
+    local_time = localtime(&now);
+    if (!local_time ||
+        !weather_session_build_timestamp_frame(
+            response, sizeof(response), 4,
+            (uint8_t)(local_time->tm_mon + 1), (uint8_t)local_time->tm_mday,
+            (uint8_t)local_time->tm_hour, (uint8_t)local_time->tm_min, true,
+            frame)) {
+        fprintf(stderr, "[-] Could not build the confirmed timestamp frame\n");
+        return false;
+    }
+    printf("Sending one confirmed native timestamp frame\n");
+    if (!write_native_segment(backend, device, frame, sizeof(frame))) {
+        return false;
+    }
+    SLEEP(100);
+    response_length = 0;
+    if (!backend->read_data(device, response, sizeof(response),
+                            &response_length)) {
+        fprintf(stderr, "[-] Follow-up read failed after timestamp write\n");
+        return false;
+    }
+    print_read_response("Readback after timestamp", response, response_length);
+    return true;
+}
+
 static bool run_listen_and_answer(USBBackend* backend, USBDevice* device,
                                   int seconds, const char* reg_code)
 {
@@ -343,6 +393,7 @@ static void print_usage(FILE* stream, const char* program)
             "Usage: %s [option]\n"
             "  --help\n"
             "  --read-once\n"
+            "  --send-current-timestamp-once\n"
             "  --probe-registration-once\n"
             "  --replay-observed-frame\n"
             "  --send-observed-weather-payload-once <32-hex-digits>\n"
@@ -374,6 +425,8 @@ int main(int argc, char* argv[])
     bool replay_observed_frame = argc > 1 &&
                                  strcmp(argv[1], "--replay-observed-frame") == 0;
     bool read_once = argc > 1 && strcmp(argv[1], "--read-once") == 0;
+    bool send_timestamp_once = argc > 1 &&
+        strcmp(argv[1], "--send-current-timestamp-once") == 0;
     bool probe_registration_once = argc > 1 &&
                                    strcmp(argv[1], "--probe-registration-once") == 0;
     bool send_observed_weather_payload_once = argc > 1 &&
@@ -390,10 +443,11 @@ int main(int argc, char* argv[])
     }
     if (argc > 1 &&
         ((!send_unsolicited && !listen_mode && !replay_observed_frame &&
-          !read_once && !probe_registration_once &&
+          !read_once && !send_timestamp_once && !probe_registration_once &&
           !send_observed_weather_payload_once && !print_registration_frame &&
           !print_weather_frame) ||
          ((replay_observed_frame || read_once || probe_registration_once ||
+           send_timestamp_once ||
            print_registration_frame || print_weather_frame) && argc != 2) ||
          (send_observed_weather_payload_once && argc != 3))) {
         print_usage(stderr, argv[0]);
@@ -511,6 +565,13 @@ int main(int argc, char* argv[])
     printf("    PID: 0x%04x\n", device.pid);
     printf("    Path: %s\n", device.device_path);
     printf("    Timeout: %d ms\n", device.timeout_ms);
+
+    if (send_timestamp_once) {
+        bool ok = send_current_timestamp_once(backend, &device);
+        usb_close(&device);
+        backend->free_device_list(devices);
+        return ok ? 0 : 1;
+    }
 
     if (listen_seconds > 0) {
         bool ok = run_listen_and_answer(backend, &device, listen_seconds,

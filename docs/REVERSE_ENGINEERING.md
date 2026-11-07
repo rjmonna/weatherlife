@@ -142,11 +142,10 @@ observed or the firmware protocol is recovered.
 
 The user reports that the connected hardware visibly shows sun/weather
 symbols, segmented date/time, and a fixed view of approximately five forecast
-days. This confirms the physical presentation is richer than a plain 16x2
-character display, but does not identify the wire selector for each visible
-slot. It also does not reconcile the visible five-day view with the native
-parser's statically present Day1--Day6 selector families; the extra source day
-may be rotated, unused, or a separate internal record.
+days. This does not establish a character grid or identify the wire selector
+for each visible slot. It also does not reconcile the visible five-day view
+with the native parser's statically present Day1--Day6 selector families; the
+extra source day may be rotated, unused, or a separate internal record.
 
 The user further reports that a tray-icon action appeared to send current
 conditions plus five forecast days over USB/HID. This matches the recovered
@@ -265,7 +264,7 @@ hardcoded Tenx HID pair `0x1130:0x0202` in `onlywell.dll`.
 
 ### Display Hardware
 
-- **Type**: 16x2 character LCD (most common)
+- **Type**: Custom segmented LCD weather display (user-reported; dimensions and segment layout not established)
 - **Interface**: Tenx composite HID
 - **Data Format**: Binary HID feature reports; weather field mapping remains
   incomplete
@@ -1350,19 +1349,11 @@ status-byte response, or byte-oriented temperature/humidity payload. The
 weather serializer's first 40 logical bits are still semantically unresolved;
 they must not be inferred from this separate HID control header.
 
-### Display Format (16x2 LCD)
+### Display Rendering
 
-Line 1 (16 chars): Location + Temperature
-```
-"NYC       72 F"
-"LONDON  18 C°"
-```
-
-Line 2 (16 chars): Weather + Humidity
-```
-"Cloudy   RH 65%"
-"Rainy  Wind:12W"
-```
+The user reports a custom segmented LCD showing weather symbols, date/time,
+and forecast slots. The mapping from native payload fields to those visible
+segments remains unverified.
 
 ## Software Architecture
 
@@ -1401,8 +1392,8 @@ Line 2 (16 chars): Weather + Humidity
 │   USB Hardware (Tenx HID 0x1130:0x0202)│
 │   ↓                                     │
 │   ┌──────────────────────────────────┐ │
-│   │  16x2 Character LCD Display      │ │
-│   │  Weather: Temp, Humidity, Wind   │ │
+│   │  Custom Weather-Life Display     │ │
+│   │  Physical layout unverified      │ │
 │   └──────────────────────────────────┘ │
 └─────────────────────────────────────────┘
 ```
@@ -1803,8 +1794,8 @@ and truncates it at the next `;`/CR; `FUN_00429e60` upper-cases it. This 40-byte
 table feeds selectors 0-4 (selector 0: length + table[0..8]; selectors 1-4: ten
 bytes from offsets 7/15/23/31). `weather_sender.c` now builds these from the
 record. A 20 s physical run (HID writes accepted) still saw the dongle request
-only selector 0, so acceptance remains unproven. The LCD has no text, so the
-table's purpose is unknown.
+only selector 0, so acceptance remains unproven. The table's purpose in the
+device/display behavior is unknown.
 
 ### weather.exe Unpacked (2026-10-11)
 
@@ -1997,6 +1988,30 @@ left untouched. A controlled original-app capture or further analysis of the
 intended encoder is needed before implementing it. No device I/O was performed
 for this analysis.
 
+### Selector 7 width consequences (2026-11-07)
+
+Further offline disassembly identifies the clock scratch values and how the
+packer consumes them:
+
+- The selector-5 clock branch calls `GetLocalTime` with the `SYSTEMTIME` at
+  `[ebp-0x834]`. It stores `wDay` at `[ebp-0x4c4]` (`0x408615`), `wYear`
+  at `[ebp-0x4bc]` (`0x408639`), and later `wDayOfWeek` at `[ebp-0x4b8]`
+  (`0x4088c7`). If these values remain in the locals when selector 7 runs,
+  its slots 4, 6, and 7 use them as bit counts, respectively.
+- If those locals still contain their entry-fill value `0xcccccccc`, the
+  signed loop comparison in `FUN_0040d340` at `0x40d38a..0x40d390` exits
+  immediately: those fields append no bits. This is conditional on the locals
+  remaining unchanged, not a claim about every session.
+- The packer accepts its bit count without a buffer-length check. A retained
+  year such as 2026 would request 2026 iterations for slot 6, far beyond the
+  normal working-buffer extent. The observed instructions imply a risk of
+  out-of-bounds accesses on that path, not proof that it occurred in a live
+  session.
+
+These are host-side properties, not intended weather field widths or LCD
+behavior. They reinforce the selector-7 refusal; do not transmit the malformed
+output. No physical device operations were performed for this analysis.
+
 ## Derived Current Value in Selector 6 (2026-11-07)
 
 The user clarified that the display is a custom LCD with weather symbols.
@@ -2099,9 +2114,29 @@ bytes at `[ebp-0x364..ebp-0x33d]`, copies the city header, and terminates
 the last byte. The selector-4 loop at `0x40701b..0x407046` packs ten bytes
 starting at `[ebp-0x345]`: table offsets 31 through 39 **and**
 `[ebp-0x33c]`. That final byte is not cleared with the table; it is also used
-as registration scratch at `0x403476..0x4034a6`. Its runtime value cannot be
-derived from the header alone. Earlier text describing this as a ten-byte
-window entirely inside a 40-byte table was incorrect.
+as registration scratch at `0x403476..0x4034a6`. Earlier text describing this
+as a ten-byte window entirely inside a 40-byte table was incorrect.
+
+Further offline disassembly narrows its possible sources:
+
+- The registration loop first generates a five-character identifier with
+  `FUN_0040d670`, then processes all five bytes. Its final iteration leaves
+  `[ebp-0x33c]` holding the high nibble of the fifth identifier character.
+- `FUN_004105e0`, called at `0x406b8a`, copies the **entire** source remainder
+  after the first semicolon with the unbounded string-copy routine at
+  `0x417a50`, and only afterward truncates the destination at a semicolon or
+  carriage return. The caller subsequently sets table offset 39 to zero.
+  If the copied remainder is shorter than 40 bytes and the scratch byte has
+  not otherwise been overwritten, the registration-derived nibble remains.
+  A remainder of exactly 40 bytes writes its terminating zero at offset 40;
+  a longer remainder writes its byte at offset 40 and can overwrite additional
+  locals. This applies to the whole copied remainder, not just the visible
+  city name before the next delimiter.
+
+These are conditional effects of the host executable's copy and startup path,
+not evidence of an intended selector-4 encoding. The exact byte in a given
+session still requires the actual input and runtime state. No overflow or
+display effect was tested on hardware.
 
 The replacement previously read past its 40-byte array for selector 4. It
 now refuses that selector without modifying the output instead of fabricating
