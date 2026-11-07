@@ -3,11 +3,11 @@
 **Device**: Tenx composite HID (`0x1130:0x0202`)  
 **Status**: Partially reverse engineered  
 **Confidence**: Discovery and registration framing are confirmed. The
-selector-6 Day-1 field order and the paired later-day selector layouts for
-Days2–6, including native widths, nibble-cell encoding, and checksum boundary,
-are statically proven. The current-condition group and a Day7 source record
-remain unresolved/unsupported. The archive and native parser stop at Day6, so
-the Day7 source record is absent rather than merely an unmapped field.
+selector-6 field order and the paired later-day selector layouts for Days2–6,
+including native widths, nibble-cell encoding, and checksum boundary, are
+statically derived. Selector 6 replaces its second Day-1 record with a
+calculated current value; its full LCD meaning is unverified. A Day7 source
+record remains unavailable; the archive and native parser stop at Day6.
 
 ## Overview
 
@@ -44,8 +44,8 @@ inventing an LCD encoding or treating `WriteFile` success as rendering.
 
 ### Observed physical display layout (2026-10-10)
 
-The user reports that the connected unit visibly shows sun/weather symbols,
-segmented date and time, and a fixed view of approximately five forecast days.
+The user reports a custom LCD with weather symbols, segmented date and time,
+and a fixed view of approximately five forecast days.
 This is useful hardware evidence for the display model, but it does not yet
 map the visible slots to selectors or prove whether the native Day1--Day6
 source range is all displayed simultaneously, rotated, or partially unused.
@@ -134,20 +134,20 @@ The passive traces contain these facts only:
    while later reads can return to `0, 0`. This supports a transient,
    write-associated response state, but does not identify its status meaning.
 - Decompilation of the `usbwr.exe` dispatcher (call at `0x00403dc8`, switch at
-  `0x00404f9a`) shows the exchange is device-polled: the low nibble of response
-  cell 1 is the selector the dongle requests (1 city/registration handler at
-  `0x004053f4`, 6 Day-1 at `0x00405f3b`, 8 later days at `0x00404fc2`; others
-  include selector families 8..19). The idle all-`0x10` and the transient
+  `0x00404f9a`) shows the exchange is device-polled. The low nibble of cell 1
+  is an outer request type: 1 is the city/registration exchange, 6 dispatches
+  an inner weather selector from cells 7 and 8, and 8 handles control data.
+  The idle all-`0x10` and the transient
   `0, 0x0b` response trigger no send. The opt-in
   `weather-life-discover --serve-weather <legacy-weather-file> <seconds>` loop
-  now uses parsed legacy named records to answer selector 6 and selectors
-  8..17. It leaves selector 1, selector 7, current selectors, and selectors
-  18/19 unanswered because their data/layout is unresolved or unavailable.
-  The loop does not perform device registration or startup initialization and
-  stops after four consecutive read failures rather than reconnecting with an
-  unknown initialization value. What makes the dongle request a selector is
-  still unknown, and previous exploratory writes produced no visible display
-  change.
+  currently refuses all weather replies: cells 2..6 identify a registered
+  device, not the weather city code, and the original maps that ID and a
+  city slot to a configured city. That mapping is not implemented. Supplying
+  a registration code still enables the experimental registration, startup
+  initialization, and periodic timestamp writes. Unsolicited weather sends
+  are disabled. Offline builders support selectors 0..3, 6, and 8..17;
+  selectors 4 and 7 remain unsupported due to stack-dependent inputs. What
+  makes the dongle request a selector and how the LCD renders it remain unknown.
 - On 2026-10-10, one exact 16-byte weather payload captured from the original
    application's `CAL_USB_WRITE` path was sent from an idle baseline. The first
    read after the write returned `10 1b 18 10 10 10 10 10 14 10 10 10 10 12
@@ -239,8 +239,9 @@ The native serializer is a dispatcher rather than one straight field list.
 record groups through nested jump tables and feed converted text to the same
 MSB-first BitPacker.
 
-Selector 6 is proven to encode the Day-1 block beginning at `TEMPH`. Its
-decoded logical bit layout is `TEMPH(9), TEMPL(9), MORING_ICON(7), WS(11),
+Selector 6 consumes the Day-1 block beginning at `TEMPH`, but substitutes a
+calculated current-conditions value for the second record. Its decoded
+logical bit layout is `TEMPH(9), derived-current(9), MORING_ICON(7), WS(11),
 WBFT(2), WW(8), HUM(0), AFTERNOON_N(5), AFWS(7), AFBFT(8), AFWW(5),
 AFHUM(8)`. These fields start at logical bit 40 and end at bit 119; bit 119
 is padding and logical byte 15 is the checksum. See
@@ -253,17 +254,16 @@ starts the weather fields at bit 40. The registration-ack response state has
 a proven conditional interpretation: cells 0/1 are `0/9`, cells 2..11 carry
 the ten ID nibbles, so the copied prefix contains the first eight ID nibbles
 and emits cell 1 as `0x0f`. Other response-state cell meanings remain
-unresolved. Selector-6 input conversions are statically resolved, including
-the 9-bit signed temperature path, icon and direction ordinals,
+unresolved. Selector-6 input conversions include the 9-bit signed temperature
+path, the derived-current calculation, icon and direction ordinals,
 field-specific missing-value handling, and the `AFBFT` scale/clamp; details
 and exact edge behavior are recorded in `docs/REVERSE_ENGINEERING.md`.
 
-The C API seeds the 32-cell buffer from readback, appends the proven 79-bit
-field order from already-converted values, adds the pad and checksum, and
-supports an explicitly named one-shot exploratory send. Source-text
-conversions and icon-name lookup are not integrated, so this test sender does
-not establish a general display-ready weather path. The application-level
-weather sender remains refused.
+The C API seeds the 32-cell buffer from readback, appends the 79-bit field
+order from already-converted values, and adds the pad and checksum. The
+selector sender implements source-text conversions and icon-name lookup, but
+does not establish a general display-ready weather path. The current-only
+application-level weather API remains refused.
 
 Each logical nibble is stored in a separate physical byte with a `0x10`
 prefix. Thus the 128-bit primary segment is 16 logical bytes / 32 physical
@@ -271,11 +271,10 @@ nibble cells, sent as two 16-byte `CAL_USB_WRITE` payloads. The 64-bit
 secondary segment is 8 logical bytes / 16 nibble cells, sent once.
 
 The record names are resolved dynamically. The native parser searches keys
-with a seven-byte stride, reads five current inputs and four inputs for each
-daily temperature calculation, and produces one current plus at most six
-daily temperature-like values. A 27-entry local selector table groups the
-current records and paired daily records. Only `TEMPH` is embedded as a useful
-key string; the other names are loaded or assembled at runtime. The initialized
+with a seven-byte stride, reads five inputs for the current calculation and
+four inputs for each daily temperature calculation, and produces one current
+plus at most six daily temperature-like values. A 27-entry local selector table
+groups the current records and paired daily records. The initialized
 width tables provide the wire widths; selector 6 and later-day selectors
 8–17 are mapped against the ordered archived fixture below. The current-
 condition group remains unmapped.
@@ -288,23 +287,12 @@ forecast selectors, and several helper conversions remain unproven. Two exact
 once each; they produced `0x0B`-prefixed responses, but the display result was
 not observed.
 
-A controlled original-app refresh provides a separate end-to-end data-path
-proof. The corrected tracer redirected the original URL to the archived
-5,642-byte Rotterdam CSV, and `InternetOpenUrlA` succeeded. The native app
-consumed the fixture and emitted 64-bit weather segments at `0x00404b89` and
-`0x00404eef`; each captured segment used `0x10`-prefixed nibble cells and
-passed the native checksum. A second fixture changed only Day-1 `TEMPH` from
-`6` to `12`. The first post-fetch `0x00404b89` payload changed physical cell 8
-from `0x14` to `0x18` and recomputed checksum cells 14 and 15; all other cells
-were unchanged. Both writes were followed by the same decoded `00 0b` response.
-This proves that a Day-1 forecast input affects checksum-valid weather data
-written to the dongle. It does not prove the display accepted or rendered it.
-An independent fixture changed only current `TEMP` from `-1.0 C` to `10.0 C`.
-The first post-fetch `0x00404b89` payload changed cell 8 from `0x14` to `0x1c`
-and recomputed checksum cells 14 and 15; all other cells were unchanged. Its
-first response also decoded to `00 0b`. Together these controlled changes
-prove that current weather and Day-1 forecast inputs both affect weather
-payloads written to the dongle, but do not prove on-screen rendering.
+A controlled refresh confirmed that the original application consumed a
+redirected archived response. Subsequent analysis identified the captured
+64-bit writes at `0x00404b89` and `0x00404eef` as periodic mode/UPD timestamp
+frames, not captured forecast frames. Changes in those writes do **not** prove
+the original sent current or forecast values. No matching type-6 exchange or
+LCD rendering has been captured.
 
 Selectors 18/19 have code branches, but the native parser and archived format
 stop at Day6, so they do not establish Day7 data. The exploratory replacement

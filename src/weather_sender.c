@@ -153,23 +153,74 @@ static bool parse_temperature(const char* text, uint16_t* output)
            encode_native_temperature(value, output);
 }
 
-static bool parse_truncated_temperature(const char* text, uint16_t* output)
+static bool read_derived_input(const RecordSet* set, const char* key,
+                               size_t* next_record, float* output)
 {
+    char text[WEATHER_RESPONSE_VALUE_SIZE];
     char* end;
-    double value;
 
-    if (!text || !output) return false;
-    if (text[0] == 'N') {
-        *output = 0xff;
+    if (!next_record || !output) return false;
+    while (*next_record < set->count &&
+           strcmp(set->records[*next_record].key, key) != 0) {
+        (*next_record)++;
+    }
+    if (*next_record == set->count ||
+        !copy_value(&set->records[(*next_record)++], text, sizeof(text))) {
+        return false;
+    }
+    if (strcmp(text, "N/A") == 0) {
+        *output = 255.0f;
         return true;
     }
     errno = 0;
-    value = strtod(text, &end);
-    if (end == text || *end != '\0' || errno == ERANGE || !isfinite(value) ||
-        value < (double)LONG_MIN || value > (double)LONG_MAX) {
+    *output = strtof(text, &end);
+    return end != text && *end == '\0' && errno != ERANGE && isfinite(*output);
+}
+
+static bool derive_current_temperature(const WeatherLegacyResponse* weather,
+                                       const WeatherLegacyDay* day,
+                                       uint16_t* output)
+{
+    RecordSet current = {weather->current, weather->current_record_count};
+    RecordSet daily = {day->records, day->record_count};
+    const RecordSet* sets[] = {&current, &current, &current, &daily, &daily};
+    const char* keys[] = {"TEMP", "WS", "HUM", "TEMPH", "TEMPL"};
+    float values[5];
+    float result;
+    long rounded;
+    long double humidity, wind, value;
+    size_t next_record = 0;
+
+    for (size_t i = 0; i < 5; i++) {
+        if (i == 3) next_record = 0;
+        if (!read_derived_input(sets[i], keys[i], &next_record, &values[i])) {
+            return false;
+        }
+        if (values[i] >= 255.0f) {
+            return encode_native_temperature(255, output);
+        }
+    }
+
+    humidity = ((long double)values[2] - 50.0L) / 15.0L;
+    wind = ((long double)values[1] * 1000.0L / 3600.0L - 2.5L) / 3.0L;
+    value = values[0];
+    if (value > (long double)(double)33.6) {
+        long double range = (long double)values[3] - values[4];
+        if (range == 0.0L) return false;
+        value += 9.0L / range + humidity;
+    } else if (value < (long double)(double)12.1) {
+        value -= humidity;
+    } else {
+        value += humidity;
+    }
+    result = (float)(value - wind);
+    if (!isfinite(result) || result < -2147483648.0 ||
+        result >= 2147483648.0) {
         return false;
     }
-    return encode_native_temperature((long)value, output);
+    rounded = (long)result;
+    if (result - (float)rounded >= 0.5f) rounded++;
+    return encode_native_temperature(rounded, output);
 }
 
 static bool parse_integer_bits(const char* text, unsigned bits,
@@ -316,11 +367,11 @@ static bool get_required(const RecordSet* set, const char* key,
     return read_record(set, key, value);
 }
 
-// Selector 6 skips the current record group and serializes Day 1's morning
-// and afternoon fields. Its integer helper stops at the first non-digit, so
-// nonnumeric direction tokens in the raw WW fields convert to zero.
+// Selector 6 reads Day 1 records but replaces slot 1 with the derived current
+// value. Nonnumeric direction tokens in the raw WW fields convert to zero.
 static WeatherSenderResult build_day1(
-    const WeatherLegacyDay* day, const uint8_t* readback,
+    const WeatherLegacyResponse* weather, const WeatherLegacyDay* day,
+    const uint8_t* readback,
     size_t readback_count, uint8_t frame[WEATHER_FRAME_NATIVE_SEGMENT_CELLS])
 {
     RecordSet set = {day->records, day->record_count};
@@ -333,7 +384,10 @@ static WeatherSenderResult build_day1(
     do { REQUIRE_RECORD(key); if (!(parser)(value, &(destination))) return WEATHER_SENDER_INVALID_VALUE; } while (0)
 
     PARSE_RECORD("TEMPH", parse_temperature, fields.temperature_high);
-    PARSE_RECORD("TEMPL", parse_truncated_temperature, fields.temperature_low);
+    REQUIRE_RECORD("TEMPL");
+    if (!derive_current_temperature(weather, day, &fields.temperature_low)) {
+        return WEATHER_SENDER_INVALID_VALUE;
+    }
     PARSE_RECORD("MORING_ICON", parse_icon, fields.morning_icon_index);
     REQUIRE_RECORD("WS");
     if (!parse_integer_bits(value, 11, false, &fields.wind_speed)) return WEATHER_SENDER_INVALID_VALUE;
@@ -374,7 +428,7 @@ static WeatherSenderResult build_later_first(
     do { REQUIRE_RECORD(key); if (!(parser)(value, &(destination))) return WEATHER_SENDER_INVALID_VALUE; } while (0)
 
     PARSE_RECORD("TEMPH", parse_temperature, fields.temperature_high);
-    PARSE_RECORD("TEMPL", parse_truncated_temperature, fields.temperature_low);
+    PARSE_RECORD("TEMPL", parse_temperature, fields.temperature_low);
     PARSE_RECORD("MORING_ICON", parse_icon, fields.morning_icon_index);
     REQUIRE_RECORD("WS");
     if (!parse_integer_bits(value, 8, false, &fields.wind_speed)) return WEATHER_SENDER_INVALID_VALUE;
@@ -447,9 +501,8 @@ static WeatherSenderResult build_later_second(
     return WEATHER_SENDER_OK;
 }
 
-// usbwr.exe FUN_00401400 cases 0-4: the 40-byte table is the upper-cased text
-// between the first and second ';' of the CITY_AND_WMO line. Selector 0 sends
-// strlen then table[0..8]; selectors 1-4 send ten bytes from offsets 7/15/23/31.
+// Selectors 0-3 use initialized bytes of the upper-cased city header table.
+// Selector 4 also reads a stack byte outside that table and is not supported.
 static WeatherSenderResult build_header(
     unsigned selector, const WeatherLegacyResponse* weather,
     const uint8_t* readback_cells, size_t readback_cell_count,
@@ -466,12 +519,13 @@ static WeatherSenderResult build_header(
             break;
         }
     }
-    if (text && (text = strchr(text, ';')) != NULL) {
-        for (text++; text[length] && text[length] != ';' &&
-                     text[length] != '\r' && length < 39; length++) {
-            char c = text[length];
-            table[length] = (uint8_t)((c >= 'a' && c <= 'z') ? c - 0x20 : c);
-        }
+    if (!text) return WEATHER_SENDER_MISSING_RECORD;
+    text = strchr(text, ';');
+    if (!text) return WEATHER_SENDER_INVALID_VALUE;
+    for (text++; text[length] && text[length] != ';' &&
+                 text[length] != '\r' && length < 39; length++) {
+        char c = text[length];
+        table[length] = (uint8_t)((c >= 'a' && c <= 'z') ? c - 0x20 : c);
     }
     if (selector == 0) {
         values[0] = (uint8_t)length;
@@ -497,14 +551,14 @@ WeatherSenderResult weather_sender_build_weather_segment(
     if (!weather || !readback_cells || !frame) {
         return WEATHER_SENDER_INVALID_VALUE;
     }
-    if (selector <= 4) {
+    if (selector <= 3) {
         return build_header(selector, weather, readback_cells,
                             readback_cell_count, frame);
     }
     if (selector == 6) {
         for (size_t i = 0; i < weather->day_count; i++) {
             if (weather->days[i].day_number == 1) {
-                return build_day1(&weather->days[i], readback_cells,
+                return build_day1(weather, &weather->days[i], readback_cells,
                                   readback_cell_count, frame);
             }
         }
@@ -550,53 +604,19 @@ bool weather_sender_decode_request(const uint8_t* readback_cells,
     request->request_type = readback_cells[1] & 0x0f;
     request->selector = (uint8_t)(((readback_cells[7] & 0x03) << 4) |
                                   (readback_cells[8] & 0x0f));
-    request->city_code[0] = '\0';
+    request->device_id[0] = '\0';
+    request->city_slot = 0;
     if (request->request_type == 6) {
+        static const char digits[] = "0123456789ABCDEF";
         for (size_t i = 0; i < 5; i++) {
             uint8_t digit = readback_cells[i + 2] & 0x0f;
-            if ((readback_cells[i + 2] & 0xf0) != 0x10 || digit > 9) {
+            if ((readback_cells[i + 2] & 0xf0) != 0x10) {
                 return false;
             }
-            request->city_code[i] = (char)('0' + digit);
+            request->device_id[i] = digits[digit];
         }
-        request->city_code[5] = '\0';
+        request->device_id[5] = '\0';
+        request->city_slot = (uint8_t)((readback_cells[7] & 0x0c) >> 2);
     }
     return true;
-}
-
-bool weather_sender_request_matches_city(
-    const WeatherSenderRequest* request,
-    const WeatherLegacyResponse* weather)
-{
-    const WeatherLegacyRecord* record = NULL;
-    const char* value;
-    const char* first_separator;
-    const char* second_separator;
-    const char* code;
-
-    if (!request || !weather || request->request_type != 6 ||
-        request->city_code[5] != '\0') {
-        return false;
-    }
-    for (size_t i = 0; i < 5; i++) {
-        if (!isdigit((unsigned char)request->city_code[i])) return false;
-    }
-    for (size_t i = 0; i < weather->current_record_count; i++) {
-        if (strcmp(weather->current[i].key, "CITY_AND_WMO") == 0) {
-            record = &weather->current[i];
-            break;
-        }
-    }
-    value = value_text(record);
-    if (!value ||
-        !(first_separator = strchr(value, ';')) ||
-        !(second_separator = strchr(first_separator + 1, ';'))) {
-        return false;
-    }
-    code = second_separator + 1;
-    for (size_t i = 0; i < 5; i++) {
-        if (!isdigit((unsigned char)code[i])) return false;
-    }
-    if (code[5] != '\0' && code[5] != ';' && code[5] != '>') return false;
-    return memcmp(request->city_code, code, 5) == 0;
 }

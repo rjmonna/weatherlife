@@ -127,6 +127,19 @@ static int test_response_parser(void)
     return 0;
 }
 
+static int set_record_value(WeatherLegacyRecord* records, size_t count,
+                            const char* key, const char* value)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(records[i].key, key) == 0) {
+            if (strlen(value) >= sizeof(records[i].value)) return 0;
+            strcpy(records[i].value, value);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_weather_sender(void)
 {
     const char response[] =
@@ -178,7 +191,7 @@ static int test_weather_sender(void)
     uint8_t expected[WEATHER_FRAME_NATIVE_SEGMENT_CELLS];
     WeatherFrameNativeSelector6Fields selector6 = {
         .temperature_high = 20,
-        .temperature_low = 10,
+        .temperature_low = 255,
         .morning_icon_index = 0,
         .wind_speed = 6,
         .beaufort = 0,
@@ -191,7 +204,7 @@ static int test_weather_sender(void)
     };
     WeatherFrameNativeLaterDayFirstFields day2_first = {
         .temperature_high = 20,
-        .temperature_low = 10,
+        .temperature_low = 11,
         .morning_icon_index = 0,
         .wind_speed = 6,
         .weather_direction_index = 1,
@@ -231,10 +244,14 @@ static int test_weather_sender(void)
     ASSERT_TRUE(weather_sender_decode_request(prefix, sizeof(prefix), &request));
     ASSERT_INT(6, request.request_type);
     ASSERT_INT(18, request.selector);
-    ASSERT_TRUE(weather_sender_request_matches_city(&request, &parsed));
-    prefix[6] = 0x15;
+    ASSERT_TRUE(strcmp(request.device_id, "06344") == 0);
+    ASSERT_INT(0, request.city_slot);
+    prefix[6] = 0x1f;
+    prefix[7] = 0x1d;
     ASSERT_TRUE(weather_sender_decode_request(prefix, sizeof(prefix), &request));
-    ASSERT_TRUE(!weather_sender_request_matches_city(&request, &parsed));
+    ASSERT_TRUE(strcmp(request.device_id, "0634F") == 0);
+    ASSERT_INT(3, request.city_slot);
+    ASSERT_INT(18, request.selector);
     prefix[6] = 0x14;
     prefix[7] = 0x10;
     prefix[8] = 0x16;
@@ -257,6 +274,77 @@ static int test_weather_sender(void)
         prefix, sizeof(prefix), &selector6, expected));
     ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
 
+    {
+        static const uint8_t wine_expected[] = {
+            0x00, 0x07, 0x07, 0x07, 0x06, 0x0b, 0x0a, 0x00,
+            0x06, 0x00, 0x10, 0x1a, 0x10, 0x11, 0x18, 0x10,
+            0x10, 0x10, 0x16, 0x10, 0x10, 0x11, 0x10, 0x10,
+            0x1c, 0x10, 0x10, 0x10, 0x15, 0x1a, 0x11, 0x16
+        };
+        WeatherLegacyResponse simulated = parsed;
+        uint8_t wine_request[WEATHER_FRAME_SIZE] = {
+            0x10, 0x16, 0x17, 0x17, 0x16, 0x1b, 0x1a, 0x10,
+            0x16, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10
+        };
+        ASSERT_TRUE(set_record_value(simulated.current,
+                                     simulated.current_record_count, "HUM", "<60>"));
+        ASSERT_TRUE(set_record_value(simulated.days[0].records,
+                                     simulated.days[0].record_count, "AFWS", "<3>"));
+        ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+            6, &simulated, wine_request, sizeof(wine_request), actual));
+        ASSERT_TRUE(memcmp(actual, wine_expected, sizeof(actual)) == 0);
+    }
+
+    invalid_weather = parsed;
+    ASSERT_TRUE(set_record_value(invalid_weather.current,
+                                 invalid_weather.current_record_count,
+                                 "HUM", "<60>"));
+    const struct {
+        const char* temperature;
+        uint16_t expected;
+    } derived_cases[] = {
+        {"<6.9>", 6}, {"<20>", 21}, {"<40>", 42},
+        {"<-10>", 0x1f6}, {"<12.099>", 12}, {"<12.1>", 13},
+        {"<33.6>", 34}, {"<33.60001>", 35}
+    };
+    for (size_t i = 0; i < sizeof(derived_cases) / sizeof(derived_cases[0]); i++) {
+        ASSERT_TRUE(set_record_value(invalid_weather.current,
+                                     invalid_weather.current_record_count,
+                                     "TEMP", derived_cases[i].temperature));
+        selector6.temperature_low = derived_cases[i].expected;
+        ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+            6, &invalid_weather, prefix, sizeof(prefix), actual));
+        ASSERT_TRUE(weather_frame_build_native_selector6(
+            prefix, sizeof(prefix), &selector6, expected));
+        ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
+    }
+    ASSERT_TRUE(set_record_value(invalid_weather.days[0].records,
+                                 invalid_weather.days[0].record_count,
+                                 "TEMPL", "<20.4>"));
+    ASSERT_TRUE(set_record_value(invalid_weather.current,
+                                 invalid_weather.current_record_count,
+                                 "TEMP", "<40>"));
+    ASSERT_INT(WEATHER_SENDER_INVALID_VALUE, weather_sender_build_weather_segment(
+        6, &invalid_weather, prefix, sizeof(prefix), actual));
+
+    invalid_weather = parsed;
+    ASSERT_TRUE(set_record_value(invalid_weather.current,
+                                 invalid_weather.current_record_count,
+                                 "TEMP", "<bad>"));
+    memset(actual, 0xa5, sizeof(actual));
+    ASSERT_INT(WEATHER_SENDER_INVALID_VALUE, weather_sender_build_weather_segment(
+        6, &invalid_weather, prefix, sizeof(prefix), actual));
+    for (size_t i = 0; i < sizeof(actual); i++) {
+        ASSERT_INT(0xa5, actual[i]);
+    }
+
+    invalid_weather = parsed;
+    WeatherLegacyRecord current_temp = invalid_weather.current[1];
+    invalid_weather.current[1] = invalid_weather.current[6];
+    invalid_weather.current[6] = current_temp;
+    ASSERT_INT(WEATHER_SENDER_INVALID_VALUE, weather_sender_build_weather_segment(
+        6, &invalid_weather, prefix, sizeof(prefix), actual));
+
     missing_day_weather = parsed;
     missing_day_weather.days[0].day_number = 2;
     ASSERT_INT(WEATHER_SENDER_MISSING_DAY,
@@ -267,6 +355,17 @@ static int test_weather_sender(void)
     day2_weather.days[0].day_number = 2;
     ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
         8, &day2_weather, prefix, sizeof(prefix), actual));
+    ASSERT_TRUE(weather_frame_build_native_later_day_first(
+        prefix, sizeof(prefix), &day2_first, expected));
+    ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
+
+    invalid_weather = day2_weather;
+    ASSERT_TRUE(set_record_value(invalid_weather.days[0].records,
+                                 invalid_weather.days[0].record_count,
+                                 "TEMPL", "<-10.8>"));
+    day2_first.temperature_low = 0x1f5;
+    ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+        8, &invalid_weather, prefix, sizeof(prefix), actual));
     ASSERT_TRUE(weather_frame_build_native_later_day_first(
         prefix, sizeof(prefix), &day2_first, expected));
     ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
@@ -294,9 +393,45 @@ static int test_weather_sender(void)
     ASSERT_INT(WEATHER_SENDER_OK,
                weather_sender_build_weather_segment(
                    1, &parsed, prefix, sizeof(prefix), actual));
+    const uint8_t header_values[4][WEATHER_FRAME_NATIVE_HEADER_VALUES] = {
+        {9, 'R', 'O', 'T', 'T', 'E', 'R', 'D', 'A', 'M'},
+        {'A', 'M', 0, 0, 0, 0, 0, 0, 0, 0},
+        {0},
+        {0}
+    };
+    for (unsigned selector = 0; selector <= 3; selector++) {
+        ASSERT_INT(WEATHER_SENDER_OK, weather_sender_build_weather_segment(
+            selector, &parsed, prefix, sizeof(prefix), actual));
+        ASSERT_TRUE(weather_frame_build_native_header(
+            prefix, sizeof(prefix), header_values[selector], expected));
+        ASSERT_TRUE(memcmp(actual, expected, sizeof(actual)) == 0);
+    }
+    memset(actual, 0xa5, sizeof(actual));
+    ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
+               weather_sender_build_weather_segment(
+                   4, &parsed, prefix, sizeof(prefix), actual));
+    for (size_t i = 0; i < sizeof(actual); i++) {
+        ASSERT_INT(0xa5, actual[i]);
+    }
+    invalid_weather = parsed;
+    ASSERT_TRUE(set_record_value(invalid_weather.current,
+                                 invalid_weather.current_record_count,
+                                 "CITY_AND_WMO", "<invalid>"));
+    ASSERT_INT(WEATHER_SENDER_INVALID_VALUE,
+               weather_sender_build_weather_segment(
+                   0, &invalid_weather, prefix, sizeof(prefix), actual));
+    invalid_weather = parsed;
+    strcpy(invalid_weather.current[0].key, "OTHER");
+    ASSERT_INT(WEATHER_SENDER_MISSING_RECORD,
+               weather_sender_build_weather_segment(
+                   0, &invalid_weather, prefix, sizeof(prefix), actual));
+    memset(actual, 0xa5, sizeof(actual));
     ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
                weather_sender_build_weather_segment(
                    7, &parsed, prefix, sizeof(prefix), actual));
+    for (size_t i = 0; i < sizeof(actual); i++) {
+        ASSERT_INT(0xa5, actual[i]);
+    }
     ASSERT_INT(WEATHER_SENDER_UNSUPPORTED_SELECTOR,
                weather_sender_build_weather_segment(
                    20, &parsed, prefix, sizeof(prefix), actual));

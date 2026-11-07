@@ -61,7 +61,7 @@ bool weather_frame_begin_native_selector6(
 
 typedef struct {
     uint16_t temperature_high;
-    uint16_t temperature_low;
+    uint16_t temperature_low; // Derived current value, not Day-1 TEMPL.
     uint16_t morning_icon_index;
     uint16_t wind_speed;
     uint16_t beaufort;

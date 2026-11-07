@@ -908,16 +908,15 @@ selector 0: converted value at ebp-0x7a4, then table[0..8]
 selector 1: table[7..16]
 selector 2: table[15..24]
 selector 3: table[23..32]
-selector 4: table[31..39]
+selector 4: table[31..39], followed by a separate stack byte
 ```
 
-The first four ranges are directly visible in the address calculations at
+The ranges and the extra stack byte are visible in the address calculations at
 `0x00406edd`, `0x00406f34`, `0x00406f8b`, `0x00406fe2`, and `0x00407039`.
 The apparent overlap between selector 0 and selector 1 is intentional: case 0
 uses a separately converted value for its first byte, while its remaining nine
-bytes and the other cases consume the rolling 40-byte table. This proves the
-header construction mechanism and byte order, but not the semantic label of
-each table byte.
+bytes and the other cases consume the rolling 40-byte table. This proves the header construction mechanism and byte order, but not the
+semantic label of each table byte. See the selector-4 correction below.
 
 The parser's semantic record names are now proven from the executable's
 embedded constants and seven-byte key layout. The five current keys are:
@@ -995,6 +994,11 @@ unresolved.
 
 ### Selector-6 Day-1 Field Layout (2026-09-27)
 
+**Correction (2026-11-07):** Slot 1 consumes the Day-1 `TEMPL` line but
+serializes the derived current value instead. The later-day `TEMPL` slots use
+the normal temperature conversion, not the derived value or truncation. See
+“Derived Current Value in Selector 6” below.
+
 This mapping is established by four independent parts of the executable:
 
 - The input stream is rewound; the first line supplies the city header, then
@@ -1018,7 +1022,7 @@ index 4 corresponds to logical bit 40.
 | Slot | Day-1 record | Start bit | Bits | Native conversion/append behavior |
 | ---: | --- | ---: | ---: | --- |
 | 0 | `TEMPH` | 40 | 9 | Signed decimal integer plus suffix-derived increment; `N...` maps to `0xff`; encoded as 9-bit two's complement |
-| 1 | `TEMPL` | 49 | 9 | Provider-derived float truncated toward zero by `__ftol`, then encoded by the `TEMPH` path |
+| 1 | `TEMPL` | 49 | 9 | Record consumed; replaced by calculated current value, then encoded by the `TEMPH` path |
 | 2 | `MORING_ICON` | 58 | 7 | Matching index in either of two 79-name tables; unknown maps to 79 |
 | 3 | `WS` | 65 | 11 | Text after `.` is discarded; signed integer is packed modulo 11 bits |
 | 4 | `WBFT` | 76 | 2 | Signed integer, or leading `-`/`N/A` as `0xff`; low 2 bits are packed |
@@ -1070,17 +1074,13 @@ and the paired later-day blocks. The response parser allows up to 32 records
 per day so it can retain the complete 24-record forecast group.
 
 `weather-life-discover --serve-weather <legacy-weather-file> <seconds>` is an
-explicit opt-in live loop. It polls every 130 ms, answers only those supported
-forecast selectors, sends each 128-bit segment as two 16-cell writes 2 ms
-apart, and stops on a malformed response, missing/invalid requested data,
-partial write, or four consecutive read failures. It does not synthesize
-missing records, log readback payloads, register the device, recreate the
-unresolved startup initialization field, or automatically reconnect. Selector
-1 (city exchange), selector 7 (a distinct eight-record path), current
-selectors 0..5, and selectors 18/19 remain unanswered. The current-condition
-`usb_send_weather_data` API remains refused: a forecast segment is not a
-complete renderer or proof of display acceptance. No physical transmission
-was performed while implementing this source-text path.
+explicit opt-in live loop. It polls every 130 ms and stops on malformed
+responses or four consecutive read failures. Weather replies are now disabled
+because the device-ID/city-slot mapping is not implemented; see the Wine
+simulation below. An optional registration code still enables experimental
+registration, initialization, and periodic timestamp writes. The
+current-condition `usb_send_weather_data` API remains refused: a forecast
+segment is not a complete renderer or proof of display acceptance.
 
 For the separately observed idle response, all normalized cells are zero, so
 the emitted prefix cells are `0, 7, 0, ...` after cell 1 is modified. The
@@ -1173,8 +1173,8 @@ Conversion details confirmed from the selector-6 switch and helper bodies:
 - `TEMPH` encodes positive magnitudes directly and negative magnitudes as
   `0x100 - magnitude`, with the sign bit, yielding a 9-bit two's-complement
   value. Negative zero is encoded as zero; an input beginning with `N` maps
-  to `0xff`. `TEMPL` converts its provider-side float with `__ftol`, formats
-  that integer, and then follows the same path. The helper sets the x87
+  to `0xff`. Selector 6 instead converts the derived current float with
+  `__ftol`, formats that integer, and then follows the same path. The helper sets the x87
   rounding-control bits to `11` for `FISTP` and restores the prior control
   word, so conversion truncates toward zero.
 - The 79-icon lookup searches two parallel name tables and returns the
@@ -1222,7 +1222,7 @@ widths and special cases are:
 | Slot | Record | Bits | Conversion |
 | ---: | --- | ---: | --- |
 | 0 | `TEMPH` | 9 | Rounded signed temperature |
-| 1 | `TEMPL` | 9 | Provider float truncated toward zero, then the temperature encoder |
+| 1 | `TEMPL` | 9 | Rounded signed temperature, same branch as `TEMPH` |
 | 2 | `MORING_ICON` | 7 | 79-name icon index; unknown is 79 |
 | 3 | `WS` | 8 | Parsed integer |
 | 4 | `WBFT` | 0 | Consumed, not appended |
@@ -1919,7 +1919,10 @@ The earlier field-name comparison inferred that selector 6 serialized current co
 
 The native selector tables resolve the mapping: `local_638[6] = 1`, `local_638[8] = 2`, and the even/odd selector pairs continue through `[18] = 7`. `FUN_0040d850` skips that many blank-separated weather groups. The stream has the current group first, followed by `DAY1`, so selector 6 starts at `DAY1`; selectors 8/9 start at `DAY2`, and selectors 16/17 at `DAY6`. Selectors 18/19 would address a seventh day, which the parsed archive contract does not provide.
 
-The selector-6 switch consumes the Day-1 records in the order and widths documented in “Selector-6 Day-1 Field Layout.” In particular, the Day-1 `WW` and `AFWW` fields use the executable's integer-prefix conversion (nonnumeric values become zero), while `AFTERNOON_N` uses the eight-entry alias lookup. The prior tests and sender mapped selector 6 to current records and mapped selectors 8..19 one day too early; both have now been corrected. `TEMPL` is still converted from its record value with truncation toward zero; the separate `FUN_00412fb0` derived-temperature calculation has not been proven to feed this wire field. No type-6 request has been observed on hardware, so live LCD acceptance remains unverified.
+The selector-6 switch consumes the Day-1 records in the order and widths documented in “Selector-6 Day-1 Field Layout.” In particular, the Day-1 `WW` and `AFWW` fields use the executable's integer-prefix conversion (nonnumeric values become zero), while `AFTERNOON_N` uses the eight-entry alias lookup. The prior tests and sender mapped selector 6 to current records and mapped selectors 8..19 one day too early; both have now been corrected. The earlier conclusion that `TEMPL` itself supplies the selector-6 wire field
+is superseded by the call-site proof below: the record is consumed but the
+derived current value is sent instead. No type-6 request has been observed on
+hardware, so live LCD acceptance remains unverified.
 
 ### Removed Unproven Write Experiments (2026-10-18)
 
@@ -1930,14 +1933,14 @@ The selector-6 switch consumes the Day-1 records in the order and widths documen
 The `FUN_00401400` readback dispatcher has two distinct selector levels:
 
 - The outer request type is `cell[1] & 0x0f`. Type 1 enters a separate city/registration response path; type 6 enters the weather-data path; type 8 enters a control/timestamp path. Type 8 is not weather selector 8.
-- Within outer type 6, the weather selector is assembled from readback cells 7 and 8: `((cell[7] & 0x03) << 4) | (cell[8] & 0x0f)`. The handler also reads the requested five-digit city code from cells 2..6.
+- Within outer type 6, the weather selector is assembled from readback cells 7 and 8: `((cell[7] & 0x03) << 4) | (cell[8] & 0x0f)`. Cells 2..6 contain a five-nibble device registration ID, not a city code; bits 2..3 of cell 7 select the city slot.
 - The native selector switch includes header selectors 0..4, selector 6, and paired forecast selectors 8..19. Selector 6 starts at Day 1; pairs 8/9 through 16/17 cover Days 2..6. Although selectors 18/19 have compiled Day-7 branches, the native response parser and archived data contract stop at Day 6, so the replacement does not serve them.
 
-`--serve-weather` decodes those separate fields, verifies that a type-6 request's five-digit city code matches the loaded `CITY_AND_WMO` record, and dispatches supported weather layouts only for outer type 6. It answers selector 6 with Day 1 and selectors 8..17 with Days 2..6; selector 18/19, outer type 1, and outer type 8 do not use these weather segments. The native registration/favorite-city lookup and date-based scheduling are not fully replicated, and no outer type-6 request has been observed in hardware traces; therefore this path is source-derived but not live-verified. Do not infer LCD acceptance from a successful HID write.
+The earlier implementation incorrectly compared the ID to the loaded `CITY_AND_WMO` code. `--serve-weather` now refuses type-6 responses until the native registration/favorite-city mapping is implemented. No outer type-6 request has been observed in hardware traces; do not infer LCD acceptance from a successful HID write.
 
 ## Unsolicited Day 1-6 Send (2026-10-24)
 
-`--send-weather-unsolicited <weather.dat> <city-code> [reg-code]` registers,
+Historically, `--send-weather-unsolicited <weather.dat> <city-code> [reg-code]` registered,
 sends the init frame (field from the last two hex digits of the `reg.dat`
 code) and the UPD timestamp frame, then writes selectors 6, 8, 10, 12, 14 and
 16 using a synthesized type-6 request prefix, since the dongle never issues
@@ -1945,6 +1948,8 @@ one. All writes succeeded and the registration acknowledgment matched, but
 every readback stayed idle (the only non-idle readback was the dongle echoing
 the timestamp frame). LCD acceptance is unconfirmed. The fixture's UPD
 timestamp is from 2010 (03/08), which may be why the display ignores it.
+This command is now disabled because its synthesized prefix used a city code
+where the original expects a registered device ID.
 
 ### Sustained Unsolicited Send (2026-10-24)
 
@@ -1956,3 +1961,227 @@ write failed. The only non-idle readback was `0b 80 19 1e 1c 10 11 11 18 13 1c
 the same second-chunk write failure in cycle 1, so the HID write path is
 intermittently refused while the dongle is busy. The user observed no LCD
 change.
+
+## Selector 7 Stack-Dependent Widths (2026-11-07)
+
+Offline disassembly of the installed `usbwr.exe` (SHA-256
+`c3578170c9e6db721cc7ecfb7c2d411f891d48c4f1422fe2f9e6c5d61509b933`)
+narrows selector 7 but does not establish a safe response format:
+
+- The selector-indexed group and record skip arrays at `0x401720` and
+  `0x401836`, used at `0x406c0c` and `0x406c36`, give selector 7 a group
+  skip of 1 and record skip of 0, like selector 6. With the archived record
+  ordering, its eight value-bearing records are Day 1's `TEMPH`, `TEMPL`,
+  `MORING_ICON`, `WS`, `WBFT`, `WW`, `HUM`, and `AFTERNOON_N`. This is not
+  the later-day second-part layout beginning at `NWS`.
+- The switch at `0x407890` uses literal widths of 8 bits for slot 0, 8 for
+  slot 3, and 9 for slot 5. Slot 1 uses the indexed width of 8; slot 2 uses
+  the indexed width of 5. Slot 5 packs a sign bit and an eight-bit value;
+  for negative input the latter is `256 - magnitude`.
+  The default path ends the record loop after slot 7 (`0x407ddc`).
+- The indexed widths are loaded from `[ebp-0x4d4 + 4*slot]` at `0x4079c0`
+  and `0x407d5f`. The initialized values at `0x401504..0x401522` cover only
+  slots 0..3 at that base. Default-path slots 4, 6, and 7 instead read
+  `[ebp-0x4c4]`, `[ebp-0x4bc]`, and `[ebp-0x4b8]`. These locations are
+  clock-related scratch locals written in the separate selector-5 branch
+  (for example `0x408615`, `0x408639`, and `0x4088c7`), not entries of an
+  initialized eight-element width table. At function entry the stack is filled
+  with `0xcccccccc`; the selector-7 path does not initialize those locations
+  before using them. Their values can therefore depend on prior execution.
+
+This is static evidence of stack-dependent behavior in this binary, not a
+device capture or a demonstrated crash. Do not infer the intended missing widths
+from the service schema or send an invented replacement. The native sender
+continues to reject selector 7, and its test verifies the output buffer is
+left untouched. A controlled original-app capture or further analysis of the
+intended encoder is needed before implementing it. No device I/O was performed
+for this analysis.
+
+## Derived Current Value in Selector 6 (2026-11-07)
+
+The user clarified that the display is a custom LCD with weather symbols.
+That observation does not identify a firmware icon/segment mapping or prove
+that a host write was rendered.
+
+For the installed `usbwr.exe` identified above, the call at `0x403918`
+passes `[ebp-0x470]` to `FUN_00412fb0`; the same buffer is recomputed at
+`0x4041a7` when the file is refreshed. The selector-6 slot-1 jump-table entry
+at `0x4093c8` points to `0x4070c2`, which loads `[ebp-0x470]`, truncates it
+to an integer and formats that value, replacing the just-consumed record
+text. Thus the wire field is the **first calculated current value**, not the
+Day-1 `TEMPL` value. The later-day switch at `0x407e12` maps both first
+slots to `0x407e1f`, which converts the actual record text with the
+temperature rounding logic. No float load occurs on that path.
+
+`FUN_00412fb0` searches forward for `TEMP`, `WS`, `HUM`, `TEMPH`, and
+`TEMPL`; in the installed legacy record ordering the first three are current
+records and the latter two are in Day 1. `FUN_0040c9e0` maps the exact text
+`N/A` to `255`, and a parsed float at least 255 short-circuits the calculation
+to 255. Otherwise the executable passes these five single-precision inputs
+to `FUN_00412e60`. With `t=TEMP`, `w=WS`, `h=HUM`, `hi=TEMPH`, and
+`lo=TEMPL`, the x87 calculation is:
+
+```text
+humidity = (h - 50) / 15
+wind = (w * 1000 / 3600 - 2.5) / 3
+t < 12.1:        result = t - humidity - wind
+12.1 <= t <= 33.6: result = t + humidity - wind
+t > 33.6:        result = t + 9 / (hi - lo) + humidity - wind
+```
+
+The result is stored as a 32-bit float. The caller truncates it to an integer
+and increments only if `result - truncated >= 0.5`; notably this does not
+round negative fractions away from zero. It then stores the integer as float;
+the selector truncates it again before the 9-bit temperature conversion.
+Comparisons use the binary double constants in the executable against the
+single-precision inputs, so decimal threshold values need not be exactly
+representable.
+
+The native sender now implements this for ordinary, ordered records and
+rejects malformed or missing inputs, nonfinite results, and division by zero
+rather than emulating undefined/error-shaped native output. Later-day `TEMPL`
+now uses the same signed rounding as `TEMPH`. The helper function itself was
+executed offline in Unicorn from the original PE: the independent test values
+`6.9`, `20`, `40`, `-10`, `12.099`, `12.1`, `33.6`, and `33.60001` (with
+`WS=7.9`, `HUM=60`, `TEMPH=20.4`, `TEMPL=10.8`) yielded rounded values
+`6`, `21`, `42`, `-10`, `12`, `13`, `34`, and `35`, respectively. Native
+regression tests check these values and the missing-data sentinel in complete
+selector-6 frames, as well as positive and negative later-day rounding.
+
+This proves host-side dataflow and selected calculation vectors, not that
+selector 6 corresponds to a particular LCD slot, that every input edge case
+matches x87 on every host architecture, or that a frame is accepted on hardware.
+No device I/O was performed.
+
+## Registration and Regi-Button Test (2026-11-07)
+
+The connected Tenx `1130:0202` device returned sixteen idle `0x10` cells in
+a read-only probe. One generated registration frame was then sent; the
+subsequent read matched the generated registration ID. This confirms the
+registration exchange for this run, not LCD acceptance of weather data.
+
+A separate two-minute `--serve-weather` session used the installed weather
+file without a registration code, so it did not send the startup init or
+timestamp frames. Only the idle response was logged; no weather request
+arrived and no weather segment was sent. The user reported pressing the
+physical `Regi` button and observing no visible LCD change. The effect and
+timing of that button relative to the device's request protocol remain
+unresolved; this test does not rule out a request under a complete startup
+session or a different display action. The user declined replay of the
+captured control frame containing an old update timestamp.
+
+## Fresh Timestamp and HID Recovery Test (2026-11-07)
+
+With the user's permission, a single control frame based on the observed idle
+prefix was sent with the current local month, day, hour, and minute. A preceding
+read showed idle cells. The write succeeded; a bounded listener subsequently
+observed type 11 alternating with idle, but no type 1, 6, or 8 request and no
+weather response was sent. The user pressed `Regi` and saw no LCD change.
+After four read failures, the listener stopped. Both Tenx HID interfaces were
+then unbound from `usbhid` even though the USB device remained enumerated.
+The cause and its relationship, if any, to the test or button press are unknown.
+
+After the user reconnected the device, both interfaces bound to `usbhid` again.
+An attempt to display CLI help instead ran the default diagnostic because the
+program did not recognize `--help`: it issued two status polls, while the
+generic test command and sample weather transmission were refused. A subsequent
+`--read-once` returned sixteen idle cells. CLI argument validation now prevents
+help and unrecognized options from entering the hardware path.
+
+Neither the timestamp write nor type 11 establishes weather acceptance or LCD
+rendering. A genuine weather request and a controlled, visually observed
+response are still needed to map the custom LCD symbols and slots.
+
+## Selector-4 Header Boundary Correction (2026-11-07)
+
+In the same installed executable, `0x406b69..0x406b99` clears exactly 40
+bytes at `[ebp-0x364..ebp-0x33d]`, copies the city header, and terminates
+the last byte. The selector-4 loop at `0x40701b..0x407046` packs ten bytes
+starting at `[ebp-0x345]`: table offsets 31 through 39 **and**
+`[ebp-0x33c]`. That final byte is not cleared with the table; it is also used
+as registration scratch at `0x403476..0x4034a6`. Its runtime value cannot be
+derived from the header alone. Earlier text describing this as a ten-byte
+window entirely inside a 40-byte table was incorrect.
+
+The replacement previously read past its 40-byte array for selector 4. It
+now refuses that selector without modifying the output instead of fabricating
+the unknown byte. Selectors 0..3 still use initialized table bytes, and now
+reject an absent or malformed city-header record. Further evidence is needed
+to establish the native scratch byte's exact runtime value and its device-side
+meaning. This is a host-code finding, not evidence of LCD rendering.
+
+## Read-Poll Observation After Reconnection (2026-11-07)
+
+For two minutes, a session-only observer sent the confirmed HID read header
+and feature-report polls without sending response, registration, or timestamp
+payloads. It counted 527 idle and 223 type-11 responses, no invalid-cell
+responses, and no type 1, 6, or 8 requests. The final poll failed; the observer
+ended before the four-failure limit. The user pressed `Regi` during the
+observation and reported no visible LCD change.
+
+Afterward, the USB device remained enumerated but interface 0 became unbound
+from `usbhid` and its hidraw node disappeared; interface 1 remained bound.
+The cause, including any connection to read polling, is unknown. Kernel logs
+were not accessible to this user. No automatic reset or rebind was attempted.
+The observer did not log raw response cells or city or registration data.
+
+## Isolated Wine Request Simulation (2026-11-07)
+
+The installed `usbwr.exe` (SHA-256
+`c3578170c9e6db721cc7ecfb7c2d411f891d48c4f1422fe2f9e6c5d61509b933`)
+ran under 32-bit Wine with a synthetic `onlywell.dll`, synthetic legacy
+weather data and a private registry. A private network namespace and `/dev`
+prevented connections to the old service and access to physical HID devices.
+The fake transport acknowledged the host startup handshake, issued an outer
+type-1 request, and then used the five nibbles returned in the original's
+type-2 response as the ID in outer type-6 requests. The original created a
+matching synthetic `reg.dat` entry. Sending type 6 with an unrelated ID
+instead produced a single error-path response.
+
+The type-6 lookup compares that ID and the two-bit city slot in cell 7
+against its in-memory or `reg.dat` entries. The entry supplies a city
+association; cells 2..6 are not the `CITY_AND_WMO` weather code. Hexadecimal
+IDs are valid. The replacement decodes the ID and slot but refuses weather
+replies until their association with the loaded weather is established.
+
+For a synthetic two-day input, one sequence requested selectors 0, 1, 2, 3,
+4, 6, 7, 8, and 9 twice each. The original returned two 16-cell writes for
+each. For selectors 0..3, 6, 8, and 9, all 32 low nibbles, including the
+checksum, matched the replacement's offline builder. The builder stores the
+first ten cells normalized, while the fake transport log contains `0x1n`
+cells, so this is a nibble comparison rather than literal byte equality.
+The selector-6 vector is a native regression test.
+
+The original also emitted selector-4 and selector-7 outputs, but this run
+does not establish the meaning or stability of their stack-dependent inputs;
+the replacement continues to refuse both. The simulation verifies host
+execution for these specific synthetic inputs only. It does not simulate
+device firmware, prove which requests real hardware generates, or reveal
+how the custom LCD renders the fields.
+
+## Single Read After Reconnection (2026-11-07)
+
+The Tenx USB device was still enumerated with interface 0 unbound before the
+user reconnected it. After reconnection, both interfaces were bound to
+`usbhid`. One confirmed read probe returned 16 valid nibble cells, all idle
+(`0x10`, outer type 0). Both interfaces remained bound immediately afterward.
+The response was processed without retaining its raw contents; no registration,
+timestamp, or weather payload was sent. One idle read neither establishes the
+cause of the earlier unbinding nor demonstrates LCD rendering.
+
+## Original UI Command Attempt Under Wine (2026-11-07)
+
+The original `weather.exe` contains the tray commands `Device Register`
+(`DeviceSearch1Click`) and `Data Refresh` (`nRefreshClickClick`). Earlier
+analysis associates registration with `usbwr.dll!usbdeviceread` and
+`device.dat`, and associates Data Refresh with a weather fetch; neither
+establishes how to trigger a physical LCD request.
+
+An attempt to run the original UI in the isolated 32-bit Wine environment
+failed before the commands could be activated: Wine repeatedly failed to
+create its desktop window and spawned repeated `explorer.exe /desktop`
+processes. Restoring missing optional 32-bit X11 libraries did not resolve
+the failure. The bounded attempts were terminated; neither button was
+successfully pressed. The environment had a private network namespace,
+private `/dev`, synthetic configuration and fake transport, so these
+attempts did not access the physical device or the discontinued service.

@@ -85,6 +85,13 @@ make
 sudo ./weather-life-discover
 ```
 
+Run `./weather-life-discover --help` to list options without accessing the
+device. Running it with no option performs the default device diagnostic.
+The experimental `--serve-weather` mode currently does not answer weather
+requests because the device-ID/city-slot mapping is unresolved; if a
+registration code is provided, it still sends registration, initialization,
+and timestamp frames. Unsolicited weather sends are disabled.
+
 #### macOS
 ```bash
 # Install dependencies

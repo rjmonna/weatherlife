@@ -59,6 +59,9 @@ if(BUILD_TESTING)
         target_link_libraries(weather-life-native-tests m)
     endif()
     add_test(NAME native-unit-tests COMMAND weather-life-native-tests)
+    add_test(NAME cli-argument-tests
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py
+                $<TARGET_FILE:weather-life-discover>)
     add_test(NAME python-unit-tests
         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p test_python.py)
     set_tests_properties(python-unit-tests PROPERTIES

@@ -21,21 +21,21 @@ typedef enum {
 typedef struct {
     uint8_t request_type;
     uint8_t selector;
-    char city_code[6];
+    char device_id[6];
+    uint8_t city_slot;
 } WeatherSenderRequest;
 
-// Decode the outer request type from cell 1 and the inner selector from
-// cells 7-8 of the native readback.
+// Decode the outer request type, hexadecimal device ID, city slot and
+// inner selector from the native readback. The ID is not a weather city code.
 bool weather_sender_decode_request(const uint8_t* readback_cells,
                                    size_t readback_cell_count,
                                    WeatherSenderRequest* request);
-bool weather_sender_request_matches_city(
-    const WeatherSenderRequest* request,
-    const WeatherLegacyResponse* weather);
 
 // Build a selector-specific response from the parsed native named records.
-// Selectors 0..4 encode city-header responses; selector 6 encodes Day 1 and
-// selectors 8..17 encode the paired forecast fields for Days 2..6.
+// Selectors 0..3 encode city-header responses; selector 6 combines Day 1
+// records with a derived current value, and selectors 8..17 encode the paired
+// forecast fields for Days 2..6. Selectors 4 and 7 remain unsupported because
+// the original reads values or widths from unrelated stack locations.
 WeatherSenderResult weather_sender_build_weather_segment(
     unsigned selector, const WeatherLegacyResponse* weather,
     const uint8_t* readback_cells, size_t readback_cell_count,
