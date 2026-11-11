@@ -84,6 +84,30 @@ segments. It is not yet a byte-level capture of that complete sequence, and it
 does not resolve whether the native Day1--Day6 source capacity includes one
 non-visible or rotated day.
 
+### Linux descriptor and ENODEV findings (2026-11-11)
+
+The kernel's HID report descriptors (read from sysfs, no device I/O) show:
+
+- Usage Page 1 / Usage 0 interface (`hidraw2`, 41-byte descriptor): an
+  8-byte x 8-bit feature report (`b1 00`, no report ID) and a 128-bit output
+  report.
+- Usage Page 1 / Usage 3 interface (`hidraw3`, 23-byte descriptor): a 64-bit
+  output report only.
+
+The descriptor's 8-byte feature report differs from the 17-byte
+(report ID + 16 payload) feature request used by `onlywell.dll` and the Linux
+transport; the descriptor-sized read was not testable because of the fault
+below, so the discrepancy is unresolved.
+
+Later the same day the device became unusable: the hub port reported
+`not attached` and the device's `urbnum` stayed frozen, while `lsusb` and the
+hidraw nodes remained. All hardware-touching hidraw calls (feature reads at
+sizes 2-64 and the `USBC` read header write) returned `ENODEV`; non-I/O
+ioctls (descriptor size, raw info) still worked. No USB traffic was issued, so
+this is a kernel-side detached state, not a protocol or report-size failure.
+Replugging is required. Nothing was written to the device during this
+investigation.
+
 The separately decompiled `usbwr.dll` confirms the registration-side helpers:
 five-character identifier generation, low-nibble response normalization, and
 the table-driven CRC checksum written into two nibble cells. These mechanics

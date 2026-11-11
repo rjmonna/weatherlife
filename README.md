@@ -366,6 +366,17 @@ if (usb_find_weather_device(&device)) {
 4. Look for unknown devices or "USB Device"
 5. Run discovery tool again
 
+### `No such device` / ENODEV on an open device (Linux)
+`lsusb` and `/dev/hidraw*` can still list the dongle after the kernel has
+dropped it (for example after a hub glitch), so opening succeeds but every
+read or write fails with `ENODEV` and no USB traffic is sent. Check:
+```bash
+cat /sys/bus/usb/devices/<hub>:1.0/<hub>-port<N>/state   # "not attached" = dropped
+cat /sys/bus/usb/devices/<bus-port>/urbnum               # frozen = no traffic
+```
+Replug the dongle, preferably into a different port or directly into the host.
+`weather-life-discover` prints the underlying HID error and a replug hint.
+
 ### Permission Denied (Linux)
 ```bash
 # Add current user to dialout group

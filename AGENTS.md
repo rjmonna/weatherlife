@@ -86,6 +86,16 @@ implement one.
 - **2026-09-17, confirmed via GhidraMCP decompilation of `usbwr.dll!usbdeviceread`:** the 17-byte frame is a **device registration handshake**, not weather/display content. `usbwr.dll` exports only this one function; it resolves `CAL_USB_WRITE`/`CAL_USB_READ`/`DeviceIni` from `onlywell.dll` via `GetProcAddress`, generates a time/rand-seeded ASCII id, nibble-packs it (`0x10 | nibble` per byte), and appends a CRC-8 (poly 0x31, MSB-first) over bytes[0..13] written as two nibbles at bytes[14..15]. This algorithm reproduces both historical captures' CRC bytes exactly. Byte[13] does not match `usbwr.dll`'s own logic (should stay `0x10`) and is presumed to be `onlywell.dll`'s responsibility (not yet decompiled). See `docs/REVERSE_ENGINEERING.md` for the full derivation and `src/device_registration.c`/`python/dongle_protocol.py` (`build_registration_frame`) for the implementation.
 - An earlier Frida attempt reported `TypeError: not a function` while installing a hook. The tracer now uses a compatible export lookup and attaches without that error; keep it passive while collecting original application traffic.
 
+## Linux Hardware Probing
+
+- Start with device-free checks: sysfs `report_descriptor` for both Tenx
+  interfaces, `lsusb -v`, and `weather-life-discover --read-once`.
+- `ENODEV` on an openable `/dev/hidraw*` means the kernel dropped the device
+  (hub port `state` is `not attached`, `urbnum` frozen), not a bad report size
+  or protocol error. Ask the user to replug; do not retry writes.
+- `dmesg` and `sudo` are unavailable to the agent; raw USB control transfers
+  via pyusb need root. Never send guessed writes while diagnosing.
+
 ## Discovery and Tracing
 
 Use the project virtual environment on Windows:

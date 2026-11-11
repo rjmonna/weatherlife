@@ -1,6 +1,7 @@
 #include "hid_transport.h"
 #include "usb_device.h"
 #include <hidapi/hidapi.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,6 +17,16 @@ struct HidTransport {
     hid_device* payload_device;
     hid_device* command_device;
 };
+
+static void report_hid_failure(const char* step, hid_device* device)
+{
+    const wchar_t* message = hid_error(device);
+
+    fprintf(stderr, "[-] HID %s failed: %ls\n", step,
+            message ? message : L"unknown error");
+    fprintf(stderr, "    If this is ENODEV/No such device, the kernel has "
+                    "dropped the dongle; replug it and retry.\n");
+}
 
 bool hid_transport_device_present(uint16_t vendor_id, uint16_t product_id,
                                   bool* out_present)
@@ -146,11 +157,15 @@ bool hid_transport_read_feature(HidTransport* transport, uint8_t* buffer,
     command_report[7] = CAL_USB_READ;
     if (hid_write(transport->command_device, command_report,
                   sizeof(command_report)) != (int)sizeof(command_report)) {
+        report_hid_failure("read command write", transport->command_device);
         return false;
     }
     result = hid_get_feature_report(transport->payload_device, report,
                                     sizeof(report));
-    if (result < 1) return false;
+    if (result < 1) {
+        report_hid_failure("feature report read", transport->payload_device);
+        return false;
+    }
     copy_size = result - 1;
     if (copy_size > buffer_size) copy_size = buffer_size;
     memcpy(buffer, report + 1, (size_t)copy_size);
