@@ -2220,3 +2220,35 @@ the failure. The bounded attempts were terminated; neither button was
 successfully pressed. The environment had a private network namespace,
 private `/dev`, synthetic configuration and fake transport, so these
 attempts did not access the physical device or the discontinued service.
+
+## Single Read and USB State Change (2026-11-14)
+
+The Tenx device changed from USB device number 14 to 22 during initial
+inspection. Once both interfaces were bound and the port reported configured,
+one confirmed read poll returned 16 valid nibble cells, all idle (outer type
+0). Both interfaces remained bound immediately afterward. No registration,
+timestamp, or weather payload was sent.
+
+During subsequent passive sysfs inspection, the port state changed to
+`default` and the device number to 0; the old hidraw nodes still existed.
+The device's runtime power control was `on`, with runtime status `active`
+before the state change. The cause and any relationship to the read are
+unknown. No further hardware I/O, reset, or rebind was attempted.
+
+After the user reported reconnecting the dongle, passive observation showed
+the port repeatedly switching between `configured` (device 22) and `default`
+(device 0), roughly every 1.6 seconds over a ten-second sample. During a
+separate five-second sample, the parent hub and two neighboring ports remained
+configured while the Tenx port continued switching. This identifies an
+unstable port/device state, not its cause; no HID reports were sent during
+these observations.
+
+The user subsequently reported moving the dongle to another port, but the
+observed USB topology still showed it at `2-1.1.4` behind the same hub. In a
+further ten-second passive sample the same state cycling continued. The
+unchanged topology does not establish that an alternate host port was tested.
+After another reported replug, the device appeared as number 26 at the same
+topological port and continued cycling during a five-second passive sample.
+In a subsequent three-minute passive observation it never remained configured
+with both interfaces bound for 20 consecutive seconds. The monitor recorded
+231 sampled state transitions; it sent no HID reports.
